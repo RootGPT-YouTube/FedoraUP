@@ -8,6 +8,6 @@ echo -e "\e[1;35mPulizia repository clonato...\e[0m"
 sleep 3
 sudo rm -fr ~/FedoraUP
 echo -e "\e[1;35mFine installazione.\e[0m"
-echo -e "\e[1;35mDa adesso avrai il comando aggiorna da lanciare da terminale per fare aggiornamento e manutenzione della tua distro Fedora.\e[0m"
+echo -e "\e[1;35mDa adesso avrai il comando aggiorna da lanciare nel terminale per fare in automatico aggiornamento e manutenzione della tua distro Fedora.\e[0m"
 sleep 3
 read
