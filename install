@@ -1,12 +1,12 @@
 git clone https://github.com/RootGPT-YouTube/FedoraUP.git
-echo "Richiesta password di root per rendere eseguibile lo script:"
+echo -e "${BOLD}Richiesta password di root per rendere eseguibile lo script:"
 sleep 1
 sudo chmod a+x ~/FedoraUP/aggiorna
-echo "Copia script in /usr/local/bin/"
+echo -e "${BOLD}Copia script in /usr/local/bin/"
 sleep 2
 sudo cp ~/FedoraUP/aggiorna /usr/local/bin/aggiorna
-echo "Pulizia repository clonato"
+echo -e "${BOLD}Pulizia repository clonato"
 sleep 2
 sudo rm -fr ~/FedoraUP
-echo "Fine installazione. Da adesso avrai il comando aggiorna da lanciare da terminale per fare aggiornamento e manutenzione della tua distro Fedora."
+echo -e "${BOLD}Fine installazione. Da adesso avrai il comando aggiorna da lanciare da terminale per fare aggiornamento e manutenzione della tua distro Fedora."
 read
