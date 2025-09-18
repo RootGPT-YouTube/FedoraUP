@@ -1,0 +1,1 @@
+sudo git clone https://github.com/RootGPT-YouTube/FedoraUP.git ~/ && sudo chmod a+x ~/FedoraUp/aggiorna && sudo cp ~/FedoraUp/aggiorna /usr/local/bin/aggiorna && sudo rm -fr ~/FedoraUp
