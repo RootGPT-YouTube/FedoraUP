@@ -1,5 +1,9 @@
+echo -e "\e[1;35mInstallazione delle dipendenze necessarie: git...\e[0m"
+echo -e "\e[1;35mRichiesta della password di root per installare eventuali dipendenze:\e[0m"
+sudo dnf install git -y
+echo -e "\e[1;35mClonazione del repository in corso...\e[0m"
+sleep 3
 git clone https://github.com/RootGPT-YouTube/FedoraUP.git
-echo -e "\e[1;35mTra un attimo ti sarà richiesta la password di root per rendere eseguibile lo script aggiorna...\e[0m"
 sudo chmod a+x ~/FedoraUP/aggiorna
 echo -e "\e[1;35mCopia script in /usr/local/bin/...\e[0m"
 sleep 3
