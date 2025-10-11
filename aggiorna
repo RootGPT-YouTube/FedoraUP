@@ -10,7 +10,7 @@ PURPLE='\e[35m'
 
 #== Impostazioni opzioni per successo o errori ==
 log_success() {
-    echo -e "${BOLD}${BLUE}✔ $1 completato con successo.${RESET}"
+    echo -e "${BOLD}${YELLOW}✔ $1 completato con successo.${RESET}"
 }
 
 log_error() {
@@ -27,6 +27,15 @@ run_step() {
     fi
 }
 
+#== Stemma ==
+echo -e "${GREEN}"
+echo "**************************************"
+echo "*                                    *"
+echo "*       Aggiorna by R∞tGPT           *"
+echo "*                                    *"
+echo "**************************************"
+echo -e "${RESET}"
+
 #== Inizio aggiornamento e manutenzione ==
 echo -e "${BOLD}${PURPLE}Richiesta password per permessi di root:${RESET}"
 sudo echo -e "${BOLD}${PURPLE}Avvio script di aggiornamento e manutenzione del sistema...${RESET}"
@@ -36,6 +45,6 @@ run_step "Pulizia pacchetti inutilizzati DNF" sudo dnf autoremove -y
 run_step "Aggiornamento Flatpak" flatpak update -y
 run_step "Rimozione Flatpak non utilizzati" flatpak uninstall --unused -y
 
-echo -e "${BOLD}${PURPLE}✔ Script terminato. Premere un tasto per continuare...${RESET}"
+echo -e "${BOLD}${BLUE}✔ Script terminato. Premere un tasto per continuare...${RESET}"
 read
 # == Termine dello script ==
