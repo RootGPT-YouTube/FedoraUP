@@ -30,9 +30,9 @@ run_step() {
 #== Stemma ==
 echo -e "${GREEN}"
 echo "**************************************"
-echo "*                                                              *"
-echo "*       Aggiorna by R∞tGPT 2.0          *"
-echo "*                                                              *"
+echo "*                                    *"
+echo "*       Aggiorna by R∞tGPT 2.0       *"
+echo "*                                    *"
 echo "**************************************"
 echo -e "${RESET}"
 
