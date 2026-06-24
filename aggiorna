@@ -171,7 +171,7 @@ run_step "Pulizia delle Flatpak inutilizzate" flatpak uninstall --unused -y
 
 # Hook opzionale: cromup
 if [ -x /usr/local/bin/cromup ]; then
-    run_step "Aggiornamento Chromium (cromup)" cromup
+    run_step "Aggiornamento Cromite (cromup)" cromup
 fi
 
 END_AVAIL=$(df --output=avail / | tail -1 | tr -d ' ')
