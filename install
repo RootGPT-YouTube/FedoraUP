@@ -1,17 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
 echo -e "\e[1;35mInstallazione delle dipendenze necessarie: git...\e[0m"
 echo -e "\e[1;35mRichiesta della password di root per installare eventuali dipendenze:\e[0m"
 sudo dnf install git -y
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
 echo -e "\e[1;35mClonazione del repository in corso...\e[0m"
 sleep 3
-git clone https://github.com/RootGPT-YouTube/FedoraUP.git
-sudo chmod a+x ~/FedoraUP/aggiorna
+git clone https://github.com/RootGPT-YouTube/FedoraUP.git "$TMPDIR/FedoraUP"
+
+sudo chmod a+x "$TMPDIR/FedoraUP/aggiorna"
 echo -e "\e[1;35mCopia script in /usr/local/bin/...\e[0m"
 sleep 3
-sudo cp ~/FedoraUP/aggiorna /usr/local/bin/aggiorna
+sudo cp "$TMPDIR/FedoraUP/aggiorna" /usr/local/bin/aggiorna
+
 echo -e "\e[1;35mPulizia repository clonato...\e[0m"
 sleep 3
-sudo rm -fr ~/FedoraUP
+# La cartella temporanea viene rimossa automaticamente dal trap EXIT
+
 echo -e "\e[1;35mFine installazione.\e[0m"
 echo -e "\e[1;35mDa adesso avrai il comando aggiorna da lanciare nel terminale per fare in automatico aggiornamento e manutenzione della tua distro Fedora.\e[0m"
 sleep 3
-read

@@ -7,6 +7,7 @@ RED='\e[31m'
 YELLOW='\e[33m'
 RESET='\e[0m'
 PURPLE='\e[35m'
+BOLD='\e[1m'
 
 #== Impostazioni opzioni per successo o errori ==
 log_success() {
@@ -38,7 +39,8 @@ echo -e "${RESET}"
 
 #== Inizio aggiornamento e manutenzione ==
 echo -e "${BOLD}${PURPLE}Richiesta password per permessi di root:${RESET}"
-sudo echo -e "${BOLD}${PURPLE}Avvio script di aggiornamento e manutenzione del sistema...${RESET}"
+sudo -v
+echo -e "${BOLD}${PURPLE}Avvio script di aggiornamento e manutenzione del sistema...${RESET}"
 
 run_step "Aggiornamento DNF" sudo dnf upgrade --refresh -y
 run_step "Pulizia pacchetti inutilizzati DNF" sudo dnf autoremove -y
@@ -52,14 +54,17 @@ fi
 
 #== Autoaggiornamento dello script ==
 echo -e "${BOLD}${PURPLE}Controllo aggiornamenti dello script...${RESET}"
-{
-    sudo curl -fsSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/aggiorna -o /tmp/aggiorna.tmp && \
-    sudo mv /tmp/aggiorna.tmp /usr/local/bin/aggiorna && \
-    sudo chmod a+x /usr/local/bin/aggiorna
-    log_success "Verifica aggiornamenti script"
-} 2>/dev/null
+if curl -fsSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/aggiorna -o /tmp/aggiorna.tmp; then
+    if sudo mv /tmp/aggiorna.tmp /usr/local/bin/aggiorna && sudo chmod a+x /usr/local/bin/aggiorna; then
+        log_success "Verifica aggiornamenti script"
+    else
+        log_error "Verifica aggiornamenti script"
+    fi
+else
+    rm -f /tmp/aggiorna.tmp
+    log_error "Verifica aggiornamenti script (download non riuscito)"
+fi
 
 #== Ultimo messaggio ==
-echo -e "${BOLD}${PURPLE}✔ Script terminato. Premere un tasto per continuare...${RESET}"
-read
+read -r -p "$(echo -e "${BOLD}${PURPLE}✔ Script terminato. Premere INVIO per continuare...${RESET}")"
 # == Termine dello script ==
