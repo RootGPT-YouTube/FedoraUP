@@ -303,60 +303,113 @@ plan_phase() {
         "$GREEN" "$RESET" "$DIM" "$G_TOTAL_PKG" "$RESET"
 }
 
+#== Broken-state auto-repair (escalating) ====================================
+# dnf has no `--fix-broken`. When a transaction dies leaving the RPM state
+# inconsistent (corrupt rpmdb, stale metadata, unfinished/duplicate packages,
+# unmet deps), run_dnf detects it from the command log and self-heals in two
+# escalating rungs before retrying the step in place:
+#   L1 (safe)  : dnf clean all + rpm --rebuilddb — repairs cache & rpmdb, no
+#                package changes at all.
+#   L2 (deep)  : dnf distro-sync — resyncs to the repos, resolving broken deps
+#                and leftover half-transactions (MAY downgrade packages). Only
+#                reached if L1 ran and the state STILL looks broken.
+
+# does the command log look like a broken / interrupted RPM state?
+dnf_looks_broken() {
+    grep -qiE 'rpmdb|rpm database|cannot open packages|depsolve|nothing provides|conflicts with file|file .* conflicts|transaction (test|check) error|could not run transaction|unfinished transaction|broken (dependencies|packages)|duplicate' "$1"
+}
+
+# L1 — safe repair (no package changes)
+_recover_dnf_l1() {
+    sudo env LC_ALL=C dnf clean all
+    sudo rpm --rebuilddb
+}
+
+# L2 — deep repair (may downgrade to match the repos)
+_recover_dnf_l2() {
+    sudo env LC_ALL=C dnf -y distro-sync
+}
+
 #== DNF step with download + transaction progress ============================
 # run_dnf "Label" "Install|Remove" dl_lo dl_hi in_lo in_hi sudo env LC_ALL=C dnf ...
 # The download phase fills the TOTAL bar's [dl_lo,dl_hi] band, the transaction
 # fills [in_lo,in_hi]; dl_lo==dl_hi means "this step never downloads".
 run_dnf() {
     local label="$1" p2="$2" dl_lo="$3" dl_hi="$4" in_lo="$5" in_hi="$6"; shift 6
+    local cmd=("$@")
     local log; log=$(mktemp)
     connector
 
-    local phase=resolve
-    local dl_done=0 dl_total=0 in_done=0 in_total=0
-    local counter="resolving…"
-    local start=$SECONDS i=0 rc=-1
     local re='^\[[[:space:]]*([0-9]+)/[[:space:]]*([0-9]+)\][[:space:]]+(.*)$'
-    local fd
-    exec {fd}< <( { "$@"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
 
-    render_live "${SPIN[0]}" "$label" '00:00' "$counter" 0 1
-    draw_total_footer "$dl_lo"
+    # Run the transaction; on a broken/interrupted failure, self-heal in two
+    # escalating rungs (L1 safe, L2 deep) and retry the same step in place.
+    local rc=-1 attempt
+    for attempt in 1 2 3; do
+        local phase=resolve
+        local dl_done=0 dl_total=0 in_done=0 in_total=0
+        local counter="resolving…"
+        local start=$SECONDS i=0 fd
+        rc=-1
+        (( attempt >= 2 )) && counter="retrying after repair…"
+        exec {fd}< <( { "${cmd[@]}"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
 
-    while true; do
-        if IFS= read -t 0.12 -r -u "$fd" line; then
-            case "$line" in __RC__*__) rc=${line#__RC__}; rc=${rc%__}; continue;; esac
-            printf '%s\n' "$line" >>"$log"
-            [[ $line == "Running transaction"* ]] && phase=install
-            if [[ $line =~ $re ]]; then
-                local n=${BASH_REMATCH[1]} m=${BASH_REMATCH[2]} rest=${BASH_REMATCH[3]}
-                local name; name=$(clean_name "$rest")
-                if [[ $name != "Total" ]]; then
-                    if [[ $phase == install ]]; then
-                        in_total=$m; in_done=$n; counter="$p2 $n/$m: $(strip_verb "$name")"
-                    else
-                        dl_total=$m; dl_done=$n; counter="Download $n/$m: $name"
+        render_live "${SPIN[0]}" "$label" '00:00' "$counter" 0 1
+        draw_total_footer "$dl_lo"
+
+        while true; do
+            if IFS= read -t 0.12 -r -u "$fd" line; then
+                case "$line" in __RC__*__) rc=${line#__RC__}; rc=${rc%__}; continue;; esac
+                printf '%s\n' "$line" >>"$log"
+                [[ $line == "Running transaction"* ]] && phase=install
+                if [[ $line =~ $re ]]; then
+                    local n=${BASH_REMATCH[1]} m=${BASH_REMATCH[2]} rest=${BASH_REMATCH[3]}
+                    local name; name=$(clean_name "$rest")
+                    if [[ $name != "Total" ]]; then
+                        if [[ $phase == install ]]; then
+                            in_total=$m; in_done=$n; counter="$p2 $n/$m: $(strip_verb "$name")"
+                        else
+                            dl_total=$m; dl_done=$n; counter="Download $n/$m: $name"
+                        fi
                     fi
                 fi
+            else
+                (( $? > 128 )) || break
             fi
+            # section bar (download = first half, install = second half) and the
+            # absolute TOTAL position within this step's two bands
+            local f=0 pm=$dl_lo
+            if   (( in_total > 0 )); then
+                f=$(( dl_total > 0 ? 500 * dl_done / dl_total + 500 * in_done / in_total : 1000 * in_done / in_total ))
+                pm=$(( in_lo + (in_hi - in_lo) * in_done / in_total ))
+            elif (( dl_total > 0 )); then
+                f=$(( 500 * dl_done / dl_total ))
+                pm=$(( dl_lo + (dl_hi - dl_lo) * dl_done / dl_total ))
+            fi
+            render_live "${SPIN[i%6]}" "$label" "$(fmt_time $(( SECONDS - start )))" "$counter" "$f" 1000
+            draw_total_footer "$pm"
+            i=$(( i + 1 ))
+        done
+        exec {fd}<&-
+
+        (( rc == 0 )) && break
+        # Failure that looks like a broken RPM state: collapse to a warning,
+        # run the next repair rung, then loop to retry. L1 on the 1st failure,
+        # L2 on the 2nd; the 3rd failure falls through to the error box.
+        if (( attempt < 3 )) && dnf_looks_broken "$log"; then
+            if (( attempt == 1 )); then
+                finish_node '⚠' "$GOLD" "$label — broken state detected, repairing (rpmdb/cache)…"
+                run_step "Repairing RPM state (clean + rebuilddb)" _recover_dnf_l1
+            else
+                finish_node '⚠' "$GOLD" "$label — still broken, deep repair (distro-sync)…"
+                run_step "Deep repair (dnf distro-sync)" _recover_dnf_l2
+            fi
+            connector
+            : > "$log"                         # fresh log for the retry
         else
-            (( $? > 128 )) || break
+            break
         fi
-        # section bar (download = first half, install = second half) and the
-        # absolute TOTAL position within this step's two bands
-        local f=0 pm=$dl_lo
-        if   (( in_total > 0 )); then
-            f=$(( dl_total > 0 ? 500 * dl_done / dl_total + 500 * in_done / in_total : 1000 * in_done / in_total ))
-            pm=$(( in_lo + (in_hi - in_lo) * in_done / in_total ))
-        elif (( dl_total > 0 )); then
-            f=$(( 500 * dl_done / dl_total ))
-            pm=$(( dl_lo + (dl_hi - dl_lo) * dl_done / dl_total ))
-        fi
-        render_live "${SPIN[i%6]}" "$label" "$(fmt_time $(( SECONDS - start )))" "$counter" "$f" 1000
-        draw_total_footer "$pm"
-        i=$(( i + 1 ))
     done
-    exec {fd}<&-
 
     draw_total_footer "$in_hi"
     if (( rc == 0 )); then
