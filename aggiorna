@@ -171,6 +171,20 @@ draw_total_footer() {
     printf '\e8'
 }
 
+# Uscita anticipata (disclaimer rifiutato, autenticazione fallita): libera le
+# righe riservate al footer, ripristina la scroll region e pulisce lo schermo —
+# altrimenti header, footer e testo restano a sporcare il terminale. Lo schermo
+# viene lasciato pulito come alla chiusura normale, con la sola riga di esito.
+exit_clean() {
+    local msg="$1" rc="${2:-0}"
+    teardown_footer
+    printf '\e[r'                              # scroll region di nuovo piena
+    printf '\e[?25h'                           # cursore visibile
+    printf '\e[H\e[2J\e[3J'                    # come `clear`, ma senza dipendere dal binario
+    printf '%s\n' "$msg"
+    exit "$rc"
+}
+
 #== Pipeline drawing =========================================================
 
 # vertical connector between two pipeline nodes
@@ -831,8 +845,7 @@ disclaimer() {
     printf "   %s%s%s\n\n" "$DIM" "$rule" "$RESET"
 
     if ! ask_yes_no "Accetti e vuoi continuare?"; then
-        printf "\n   %sUscita: nessuna modifica effettuata.%s\n\n" "$DIM" "$RESET"
-        exit 0
+        exit_clean "   ${DIM}Uscita: nessuna modifica effettuata.${RESET}" 0
     fi
     printf '\e[?25h'                      # la password va digitata a cursore visibile
     echo
@@ -901,8 +914,7 @@ disclaimer
 # pipe, so sudo must never stop to ask for the password mid-run)
 printf '   %s🔑 Administrator authentication required...%s\n\n' "$GOLD" "$RESET"
 if ! sudo -v; then
-    printf '   %s✗ Authentication failed. Exiting.%s\n' "$RED" "$RESET"
-    exit 1
+    exit_clean "   ${RED}✗ Authentication failed. Exiting.${RESET}" 1
 fi
 ( while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
 SUDO_PID=$!
