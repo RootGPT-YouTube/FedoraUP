@@ -4,20 +4,19 @@ Copia e incolla nel terminale il comando sottostante (accertati di essere nella 
 `curl -sSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/install | bash`  
 Adesso avrai un comando nuovo nel terminale - `aggiorna` - che quando lo lancerai aggiornerà tutte le app installate con DNF e FLATPAK e farà anche pulizia dei file e dipendenze obsolete.
 
-## ⚠️ Disclaimer — leggi prima di usarlo
+## ⚠️ Avviso di responsabilità — leggi prima di usarlo
 
-`aggiorna` modifica il sistema: installa aggiornamenti di pacchetti, di Flatpak e di **firmware**, e su richiesta può far passare Fedora a una **nuova versione**.
+**AGGIORNA** esegue una sequenza di comandi di sistema (`dnf`, `flatpak`, `fwupdmgr`) per aggiornare Fedora, e su richiesta può portare il sistema operativo a una **nuova versione**.
 
-Due funzioni **non sono ancora state provate su un caso reale**, ma soltanto con comandi simulati:
+Sono operazioni che modificano il sistema in profondità. Per quanto lo script sia scritto con cura, un imprevisto resta sempre possibile: un aggiornamento interrotto, un pacchetto difettoso o un firmware andato storto possono lasciare il sistema instabile o non avviabile.
 
-- il **passaggio a una nuova versione di Fedora** (`dnf system-upgrade`);
-- la gestione degli **aggiornamenti messi in coda per l'installazione al riavvio** (gli "offline updates" di Discover / GNOME Software).
+AGGIORNA è distribuito **senza alcuna garanzia**, come previsto dalle sezioni 15 e 16 della licenza [GNU GPL v3](LICENSE). **L'autore non risponde di danni, perdita di dati o sistemi resi inutilizzabili** derivanti dall'uso dello script.
 
-Del loro buon funzionamento **non posso dare garanzia**.
+**Usando AGGIORNA lo fai a tuo rischio e ti assumi la piena responsabilità delle modifiche apportate al tuo sistema.** Se hai dati importanti, fai un backup prima di procedere.
 
-Lo script è fornito **così com'è, senza alcuna garanzia di alcun tipo**. L'autore **non si assume alcuna responsabilità** per danni, perdita di dati, sistemi resi non avviabili o qualunque altro problema derivante da un aggiornamento andato male. Usalo a tuo rischio, e **se hai dati importanti fai un backup prima**.
+Lo stesso avviso compare all'avvio del comando, prima ancora che venga chiesta la password, e richiede una conferma esplicita: qualunque risposta diversa da `y`/`s` fa uscire lo script **senza modificare nulla**.
 
-Lo stesso avviso compare all'avvio del comando, che chiede conferma prima di toccare qualsiasi cosa: rispondendo qualunque cosa diversa da `y`/`s` lo script esce senza modificare nulla.
+Nota, al momento: il **passaggio a una nuova versione di Fedora** e la gestione degli **aggiornamenti messi in coda per l'installazione al riavvio** sono stati provati soltanto con comandi simulati, non ancora su un caso reale.
 
 ## Interfaccia
 `aggiorna` ha un'interfaccia originale, pensata per essere chiara e gradevole nel terminale:

@@ -809,23 +809,28 @@ ask_yes_no() {
 # reale, e un aggiornamento di sistema andato male non è un problema piccolo.
 # Chi lancia lo script deve poterlo sapere e potersi fermare a costo zero.
 disclaimer() {
-    local rule; rule=$(rep 64 '─')
-    printf "   %s⚠  ATTENZIONE — LEGGI PRIMA DI CONTINUARE%s\n" "$GOLD$BOLD" "$RESET"
+    local rule; rule=$(rep 68 '─')
+    printf "   %s⚠  AVVISO DI RESPONSABILITÀ — LEGGI PRIMA DI CONTINUARE%s\n" "$GOLD$BOLD" "$RESET"
     printf "   %s%s%s\n" "$DIM" "$rule" "$RESET"
-    printf "      Questo script modifica il sistema: aggiorna i pacchetti DNF e\n"
-    printf "      Flatpak, rimuove le dipendenze orfane e installa gli aggiornamenti\n"
-    printf "      firmware.\n\n"
-    printf "      %sDue funzioni non sono ancora state provate su un caso reale:%s\n" "$BOLD" "$RESET"
-    printf "        %s•%s il passaggio a una nuova versione di Fedora\n" "$GOLD" "$RESET"
-    printf "        %s•%s gli aggiornamenti messi in coda per l'installazione al riavvio\n" "$GOLD" "$RESET"
-    printf "      Il loro buon funzionamento non può essere garantito.\n\n"
-    printf "      Lo script è fornito %sCOSÌ COM'È, senza alcuna garanzia%s. L'autore non\n" "$BOLD" "$RESET"
-    printf "      si assume responsabilità per danni, perdita di dati o sistemi resi\n"
-    printf "      inutilizzabili da un aggiornamento andato male.\n\n"
-    printf "      %sSe hai dati importanti, fai un backup prima di procedere.%s\n" "$GOLD" "$RESET"
+    printf "      %sAGGIORNA%s esegue una sequenza di comandi di sistema (dnf, flatpak,\n" "$BOLD" "$RESET"
+    printf "      fwupdmgr) per aggiornare Fedora, e su richiesta può portare il\n"
+    printf "      sistema operativo a una nuova versione.\n\n"
+    printf "      Sono operazioni che modificano il sistema in profondità. Per quanto\n"
+    printf "      lo script sia scritto con cura, un imprevisto resta sempre possibile:\n"
+    printf "      un aggiornamento interrotto, un pacchetto difettoso o un firmware\n"
+    printf "      andato storto possono lasciare il sistema instabile o non avviabile.\n\n"
+    printf "      AGGIORNA è distribuito %ssenza alcuna garanzia%s, come previsto dalle\n" "$BOLD" "$RESET"
+    printf "      sezioni 15 e 16 della licenza GNU GPL v3. %sL'autore non risponde di\n" "$BOLD"
+    printf "      danni, perdita di dati o sistemi resi inutilizzabili%s derivanti\n" "$RESET"
+    printf "      dall'uso dello script.\n\n"
+    printf "      %sContinuando, dichiari di usare AGGIORNA a tuo rischio e di assumerti\n" "$GOLD"
+    printf "      la piena responsabilità delle modifiche apportate al tuo sistema.%s\n\n" "$RESET"
+    printf "      %sSe hai dati importanti, fai un backup prima di procedere.%s\n" "$DIM" "$RESET"
+    printf "      %sNota: il passaggio di versione e la gestione degli aggiornamenti in\n" "$DIM"
+    printf "      coda per il riavvio non sono ancora stati provati su un caso reale.%s\n" "$RESET"
     printf "   %s%s%s\n\n" "$DIM" "$rule" "$RESET"
 
-    if ! ask_yes_no "Vuoi continuare?"; then
+    if ! ask_yes_no "Accetti e vuoi continuare?"; then
         printf "\n   %sUscita: nessuna modifica effettuata.%s\n\n" "$DIM" "$RESET"
         exit 0
     fi
