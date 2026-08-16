@@ -30,6 +30,14 @@ DNF_UPG=0
 DNF_AUTO=0
 FU_REFS=()       # Flatpak refs to update
 FX_REFS=()       # unused Flatpak refs to remove
+FW_IDS=()        # fwupd device IDs with a firmware update pending
+FW_NAMES=()      # human names, index-aligned with FW_IDS
+
+# Reboot-class updates (see the "reboot" section at the bottom)
+OFFLINE_PENDING=0   # an offline/staged transaction (Discover) is waiting for a reboot
+NEXT_REL=''         # next Fedora release available for a version jump ('' = none)
+SYSUP_STAGED=0      # a system-upgrade has been downloaded and awaits the reboot
+REBOOT_REASONS=()   # why a reboot is needed, filled by detect_reboot_needed
 
 # Per-mille band boundaries on the TOTAL bar (filled by plan_phase). Each section
 # fills its [lo,hi] slice; boundaries are contiguous so the bar never jumps back.
@@ -37,7 +45,8 @@ B_DLU_HI=300     # download (DNF upgrade):  0 .. B_DLU_HI
 B_INU_HI=500     # install, upgrade share:  B_DLU_HI .. B_INU_HI
 B_INA_HI=700     # install, autoremove:     B_INU_HI .. B_INA_HI
 B_FPU_HI=850     # flatpak update share:    B_INA_HI .. B_FPU_HI
-                 # flatpak remove share:    B_FPU_HI .. 1000
+B_FPX_HI=900     # flatpak remove share:    B_FPU_HI .. B_FPX_HI
+                 # firmware (fwupd) share:  B_FPX_HI .. 1000
 
 # Live block bookkeeping
 LIVE_DRAWN=0
@@ -203,6 +212,42 @@ error_box() {
 # on the terminal — e.g. fwupd or a GPG key import. Its stdin IS the terminal,
 # so the user can reply directly: we only need to surface the hidden prompt,
 # show the cursor, and freeze the live UI until the command resumes.
+#
+# Two detectors run side by side, because a prompt reaches us in two shapes:
+#   1. unterminated line — "Perform operation? [Y|n]: " with no newline; the
+#      log stops growing mid-line (fast trigger, ~1.8 s).
+#   2. terminated line — some tools print the question WITH a newline and then
+#      block on read(). Nothing is left pending, so shape 1 never fires: we
+#      instead watch for a long silence whose last complete line reads like a
+#      question (slow trigger, ~20 s, so it can't misfire on a slow step).
+QUIET_TICKS=167                     # ~20 s at the 0.12 s poll interval
+
+# Both detectors only see what actually leaves the command. Writing to a pipe
+# switches stdio to block buffering, which can hold a question — printed without
+# a trailing newline, so nothing forces a flush — inside the buffer until much
+# later output fills it: the user would sit in front of a frozen bar answering
+# nothing. Running the command unbuffered removes that failure mode entirely.
+# Note sudo drops LD_PRELOAD, so stdbuf must sit *inside* sudo to have an effect.
+# Empty (and everything behaves as before) if stdbuf is not installed.
+UNBUF=()
+command -v stdbuf >/dev/null 2>&1 && UNBUF=(stdbuf -o0 -e0)
+
+# does this line read like a question waiting for an answer?
+is_question() {
+    local s="${1%"${1##*[![:space:]]}"}"      # strip trailing whitespace
+    [[ -z $s ]] && return 1
+    local re_brk='\[[^]]*[YyNn][^]]*\][:.]?$'      # ...[Y|n]   ...[y/N]:
+    local re_par='\([YyNn][^)]*\)[:.]?$'           # ...(y/n):
+    local re_end='[:?][[:space:]]*$'
+    local re_kw='(Is this ok|Perform operation|Continue|Proceed|Confirm|password|Choose|Select)'
+    [[ $s == *'?' ]]     && return 0               # ...continue?
+    [[ $s =~ $re_brk ]]  && return 0
+    [[ $s =~ $re_par ]]  && return 0
+    # a keyword prompt that ends where an answer would go
+    [[ $s =~ $re_end && $s =~ $re_kw ]] && return 0
+    return 1
+}
+
 ask_begin() {
     local label="$1" text="$2"
     (( LIVE_DRAWN )) && printf '\e[%dA' "$LIVE_LINES"
@@ -219,12 +264,33 @@ ask_begin() {
 # the command produced output again: hide the cursor and resume the pipeline
 ask_end() { printf '\e[?25l\n'; }
 
+# Idle-tick prompt detector shared by every streaming runner. Called once per
+# poll timeout with the runner's own state variables (passed by name):
+#   poll_prompt <label> <pending> <stall> <asking> <last_line> <log>
+poll_prompt() {
+    local _lbl=$1 _log=$6
+    local -n _p=$2 _s=$3 _a=$4 _l=$5
+    (( _a )) && return                       # already waiting for the user
+    _s=$(( _s + 1 ))
+    if [[ -n $_p ]]; then                    # unterminated line → fast trigger
+        (( _s >= 15 )) || return
+        printf '%s\n' "$_p" >>"$_log"
+        ask_begin "$_lbl" "$_p"
+        _p=''; _a=1
+    elif (( _s >= QUIET_TICKS )) && is_question "$_l"; then   # silence → slow trigger
+        ask_begin "$_lbl" "$_l"; _a=1
+    fi
+}
+
 #== Plain spinner step (no per-package progress: e.g. cromup) =================
 run_step() {
     local label="$1"; shift
     local log; log=$(mktemp)
     connector
-    "$@" >"$log" 2>&1 &
+    # <&0 is not decoration: bash gives an asynchronous command /dev/null for
+    # stdin, so without it the command would hit EOF the moment it asked
+    # anything — the question would show up on screen with no way to answer it.
+    "$@" >"$log" 2>&1 <&0 &
     local pid=$! i=0 start=$SECONDS
     local asking=0 stall=0 last_size=0 size
     while kill -0 "$pid" 2>/dev/null; do
@@ -233,9 +299,15 @@ run_step() {
         if (( size != last_size )); then
             last_size=$size; stall=0
             (( asking )) && { ask_end; asking=0; }
-        elif (( ! asking && size > 0 )) && [[ -n $(tail -c 1 "$log") ]] && (( ++stall >= 15 )); then
-            ask_begin "$label" "$(tail -n 1 "$log")"
-            asking=1
+        elif (( ! asking && size > 0 )); then
+            stall=$(( stall + 1 ))
+            if [[ -n $(tail -c 1 "$log") ]]; then
+                # unterminated line: a prompt, surface it quickly
+                (( stall >= 15 )) && { ask_begin "$label" "$(tail -n 1 "$log")"; asking=1; }
+            elif (( stall >= QUIET_TICKS )) && is_question "$(tail -n 1 "$log")"; then
+                # long silence after a question printed with its newline
+                ask_begin "$label" "$(tail -n 1 "$log")"; asking=1
+            fi
         fi
         if (( ! asking )); then
             printf '\r   %s%s%s  %s   %s%s%s\e[K' \
@@ -277,6 +349,33 @@ flatpak_refs() {
     fi | awk -F'\t' '/^[[:space:]]*[0-9]+\./ { gsub(/^[ \t]+|[ \t]+$/,"",$3); if ($3!="") print $3 }'
 }
 
+# Devices with a pending firmware update, one "DeviceId<TAB>Name" line each.
+# fwupd stages most updates and applies them at the next boot, which is exactly
+# the class of update the pipeline used to skip.
+fw_updates() {
+    command -v fwupdmgr >/dev/null 2>&1 || return 0
+    # refresh the LVFS metadata; it exits non-zero when already fresh — harmless
+    sudo env LC_ALL=C fwupdmgr refresh --force >/dev/null 2>&1
+    local json
+    json=$(env LC_ALL=C fwupdmgr get-updates --json 2>/dev/null) || return 0
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" | jq -r '.Devices[]? | "\(.DeviceId)\t\(.Name // "firmware")"' 2>/dev/null
+    else
+        printf '%s' "$json" | grep -oP '"DeviceId"[[:space:]]*:[[:space:]]*"\K[^"]+' | sed 's/$/\tfirmware/'
+    fi
+}
+
+# The next Fedora release, but only once it is actually published ('' otherwise).
+next_release() {
+    local cur next
+    cur=$(rpm -E %fedora 2>/dev/null)
+    [[ $cur =~ ^[0-9]+$ ]] || return 0
+    next=$(( cur + 1 ))
+    curl -fsS --max-time 10 -o /dev/null \
+        "https://dl.fedoraproject.org/pub/fedora/linux/releases/$next/Everything/$(uname -m)/os/repodata/repomd.xml" \
+        2>/dev/null && printf '%s' "$next"
+}
+
 plan_phase() {
     connector
     local tmp; tmp=$(mktemp)
@@ -285,13 +384,22 @@ plan_phase() {
         auto=$(dnf_plan_count sudo env LC_ALL=C dnf autoremove)
         mapfile -t fu < <(flatpak_refs update)
         mapfile -t fx < <(flatpak_refs unused)
+        mapfile -t fw < <(fw_updates)
+        # /system-update is the systemd trigger both dnf and PackageKit create
+        # when an update is staged to be installed at the next boot
+        offl=0; [ -e /system-update ] && offl=1
+        nrel=$(next_release)
         {
             printf 'P_UPG=%d\n'  "${upg:-0}"
             printf 'P_AUTO=%d\n' "${auto:-0}"
+            printf 'P_OFFL=%d\n' "$offl"
+            printf 'P_NREL=%s\n' "$nrel"
             printf 'FU=%s\n' "$(printf '%s\n' "${fu[@]}")"
             printf '__FUEND__\n'
             printf 'FX=%s\n' "$(printf '%s\n' "${fx[@]}")"
             printf '__FXEND__\n'
+            printf 'FW=%s\n' "$(printf '%s\n' "${fw[@]}")"
+            printf '__FWEND__\n'
         } > "$tmp"
     ) &
     local pid=$! i=0 start=$SECONDS
@@ -305,22 +413,31 @@ plan_phase() {
     # parse the plan
     DNF_UPG=$(sed -n 's/^P_UPG=//p'  "$tmp"); DNF_UPG=${DNF_UPG:-0}
     DNF_AUTO=$(sed -n 's/^P_AUTO=//p' "$tmp"); DNF_AUTO=${DNF_AUTO:-0}
+    OFFLINE_PENDING=$(sed -n 's/^P_OFFL=//p' "$tmp"); OFFLINE_PENDING=${OFFLINE_PENDING:-0}
+    NEXT_REL=$(sed -n 's/^P_NREL=//p' "$tmp")
     mapfile -t FU_REFS < <(sed -n '/^FU=/,/^__FUEND__$/p' "$tmp" | sed '1s/^FU=//; /^__FUEND__$/d; /^$/d')
     mapfile -t FX_REFS < <(sed -n '/^FX=/,/^__FXEND__$/p' "$tmp" | sed '1s/^FX=//; /^__FXEND__$/d; /^$/d')
+    local fw_lines fwl
+    mapfile -t fw_lines < <(sed -n '/^FW=/,/^__FWEND__$/p' "$tmp" | sed '1s/^FW=//; /^__FWEND__$/d; /^$/d')
+    FW_IDS=(); FW_NAMES=()
+    for fwl in "${fw_lines[@]}"; do
+        FW_IDS+=("${fwl%%$'\t'*}"); FW_NAMES+=("${fwl#*$'\t'}")
+    done
     rm -f "$tmp"
 
-    local nfu=${#FU_REFS[@]} nfx=${#FX_REFS[@]}
-    G_TOTAL_PKG=$(( DNF_UPG + DNF_AUTO + nfu + nfx ))
+    local nfu=${#FU_REFS[@]} nfx=${#FX_REFS[@]} nfw=${#FW_IDS[@]}
+    G_TOTAL_PKG=$(( DNF_UPG + DNF_AUTO + nfu + nfx + nfw ))
 
-    # Carve the 0..1000 bar into download / install / flatpak bands, weighted
-    # 30/40/30 — but a phase with no work hands its weight to the others, so the
-    # present phases always stretch to fill the whole bar.
+    # Carve the 0..1000 bar into download / install / flatpak / firmware bands,
+    # weighted 30/40/20/10 — but a phase with no work hands its weight to the
+    # others, so the present phases always stretch to fill the whole bar.
     local in_tot=$(( DNF_UPG + DNF_AUTO )) fp_tot=$(( nfu + nfx ))
-    local wdl=0 win=0 wfp=0
+    local wdl=0 win=0 wfp=0 wfw=0
     (( DNF_UPG > 0 )) && wdl=30
     (( in_tot   > 0 )) && win=40
-    (( fp_tot   > 0 )) && wfp=30
-    local w=$(( wdl + win + wfp )); (( w == 0 )) && w=1
+    (( fp_tot   > 0 )) && wfp=20
+    (( nfw      > 0 )) && wfw=10
+    local w=$(( wdl + win + wfp + wfw )); (( w == 0 )) && w=1
 
     B_DLU_HI=$(( 1000 * wdl / w ))                         # end of download band
     local in_lo=$B_DLU_HI in_span=$(( 1000 * win / w ))
@@ -328,16 +445,26 @@ plan_phase() {
     # split the install band between upgrade and autoremove by package count
     B_INU_HI=$(( in_tot > 0 ? in_lo + in_span * DNF_UPG / in_tot : in_lo ))
     B_INA_HI=$in_hi
-    # the flatpak band is everything left up to 1000, split update vs remove
-    local fp_lo=$in_hi
-    B_FPU_HI=$(( fp_tot > 0 ? fp_lo + (1000 - fp_lo) * nfu / fp_tot : fp_lo ))
+    # flatpak band, split update vs remove by ref count
+    local fp_lo=$in_hi fp_span=$(( 1000 * wfp / w ))
+    local fp_hi=$(( fp_lo + fp_span ))
+    B_FPU_HI=$(( fp_tot > 0 ? fp_lo + fp_span * nfu / fp_tot : fp_lo ))
+    B_FPX_HI=$fp_hi
+    # firmware takes whatever is left, so the bar always ends at 1000
+    (( wfw == 0 )) && B_FPX_HI=1000
 
     draw_total_footer 0
-    printf '\r   %s●%s  Planning complete  %s(%d package(s) to process)%s\e[K\n' \
-        "$GREEN" "$RESET" "$DIM" "$G_TOTAL_PKG" "$RESET"
+    printf '\r   %s●%s  Planning complete  %s(%d item(s) to process%s)%s\e[K\n' \
+        "$GREEN" "$RESET" "$DIM" "$G_TOTAL_PKG" \
+        "$( (( nfw > 0 )) && printf ', %d firmware' "$nfw" )" "$RESET"
 }
 
 #== Broken-state auto-repair (escalating) ====================================
+# Set to 1 around a step where a depsolve failure is an expected answer rather
+# than a symptom (the release upgrade), so run_dnf reports it instead of
+# "repairing" a system that is not broken.
+NO_AUTOREPAIR=0
+
 # dnf has no `--fix-broken`. When a transaction dies leaving the RPM state
 # inconsistent (corrupt rpmdb, stale metadata, unfinished/duplicate packages,
 # unmet deps), run_dnf detects it from the command log and self-heals in two
@@ -391,7 +518,7 @@ run_dnf() {
         render_live "${SPIN[0]}" "$label" '00:00' "$counter" 0 1
         draw_total_footer "$dl_lo"
 
-        local pending='' stall=0 asking=0
+        local pending='' stall=0 asking=0 last_line=''
         while true; do
             line=''
             if IFS= read -t 0.12 -r -u "$fd" line; then
@@ -400,6 +527,7 @@ run_dnf() {
                 stall=0
                 case "$line" in __RC__*__) rc=${line#__RC__}; rc=${rc%__}; continue;; esac
                 printf '%s\n' "$line" >>"$log"
+                last_line="$line"
                 [[ $line == "Running transaction"* ]] && phase=install
                 if [[ $line =~ $re ]]; then
                     local n=${BASH_REMATCH[1]} m=${BASH_REMATCH[2]} rest=${BASH_REMATCH[3]}
@@ -418,10 +546,8 @@ run_dnf() {
                 # a line that then stays unfinished is a prompt awaiting an answer
                 if [[ -n $line ]]; then
                     pending+="$line"; stall=0
-                elif (( ! asking )) && [[ -n $pending ]] && (( ++stall >= 15 )); then
-                    printf '%s\n' "$pending" >>"$log"
-                    ask_begin "$label" "$pending"
-                    pending=''; asking=1
+                else
+                    poll_prompt "$label" pending stall asking last_line "$log"
                 fi
             fi
             (( asking )) && continue           # UI frozen while the user answers
@@ -447,7 +573,7 @@ run_dnf() {
         # Failure that looks like a broken RPM state: collapse to a warning,
         # run the next repair rung, then loop to retry. L1 on the 1st failure,
         # L2 on the 2nd; the 3rd failure falls through to the error box.
-        if (( attempt < 3 )) && dnf_looks_broken "$log"; then
+        if (( attempt < 3 && ! NO_AUTOREPAIR )) && dnf_looks_broken "$log"; then
             if (( attempt == 1 )); then
                 finish_node '⚠' "$GOLD" "$label — broken state detected, repairing (rpmdb/cache)…"
                 run_step "Repairing RPM state (clean + rebuilddb)" _recover_dnf_l1
@@ -493,11 +619,11 @@ run_flatpak() {
         idx=$(( idx + 1 ))
         local cur_pct=0 lrc=0 fd
         if [[ $mode == update ]]; then
-            exec {fd}< <( { env LC_ALL=C flatpak update -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
+            exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak update -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
         else
-            exec {fd}< <( { env LC_ALL=C flatpak uninstall -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
+            exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak uninstall -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
         fi
-        local pending='' stall=0 asking=0
+        local pending='' stall=0 asking=0 last_line=''
         while true; do
             line=''
             if IFS= read -t 0.12 -r -u "$fd" line; then
@@ -506,6 +632,7 @@ run_flatpak() {
                 stall=0
                 case "$line" in __RC__*__) lrc=${line#__RC__}; lrc=${lrc%__}; continue;; esac
                 printf '%s\n' "$line" >>"$log"
+                last_line="$line"
                 [[ $line =~ ([0-9]+)%[^0-9]*$ ]] && cur_pct=${BASH_REMATCH[1]}
             else
                 (( $? > 128 )) || break
@@ -513,10 +640,8 @@ run_flatpak() {
                 # a line that then stays unfinished is a prompt awaiting an answer
                 if [[ -n $line ]]; then
                     pending+="$line"; stall=0
-                elif (( ! asking )) && [[ -n $pending ]] && (( ++stall >= 15 )); then
-                    printf '%s\n' "$pending" >>"$log"
-                    ask_begin "$label" "$pending"
-                    pending=''; asking=1
+                else
+                    poll_prompt "$label" pending stall asking last_line "$log"
                 fi
             fi
             (( asking )) && continue           # UI frozen while the user answers
@@ -539,6 +664,132 @@ run_flatpak() {
         finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
     fi
     rm -f "$log"
+}
+
+#== Firmware section (fwupd) =================================================
+# run_fw "Label" lo hi device-id...
+# Flashes one device at a time, filling the TOTAL bar's [lo,hi] band.
+#
+# fwupd is deliberately run WITHOUT --assume-yes: its questions ("Perform
+# operation?", a vendor warning to acknowledge, a branch switch) are real
+# decisions and must reach the user. They do — the prompt detector surfaces them
+# and hands over the keyboard, exactly like any other step. The only forced flag
+# is --no-reboot-check, because the reboot is proposed once, at the very end.
+run_fw() {
+    local label="$1" lo="$2" hi="$3"; shift 3
+    local ids=("$@") N=$#
+    local log; log=$(mktemp)
+    connector
+
+    if (( N == 0 )); then
+        render_live "${SPIN[0]}" "$label" '00:00' 'no firmware updates' 1 1
+        draw_total_footer "$hi"
+        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 )); rm -f "$log"; return
+    fi
+
+    local rc=0 start=$SECONDS i=0 idx=0 id
+    for id in "${ids[@]}"; do
+        idx=$(( idx + 1 ))
+        local name="${FW_NAMES[idx-1]:-$id}"
+        local cur_pct=0 lrc=0 fd
+        # fwupd redraws its progress bar with \r; turning those into real lines
+        # keeps the prompt detector from reading a redrawing bar as a question.
+        # tr must be unbuffered too, or it would hold back the very question we
+        # need to show — a buffered tr swallows it until the next flush.
+        exec {fd}< <( { sudo "${UNBUF[@]}" env LC_ALL=C fwupdmgr update --no-reboot-check "$id" 2>&1
+                        printf '\n__RC__%d__\n' "$?"; } | "${UNBUF[@]}" tr '\r' '\n' )
+        local pending='' stall=0 asking=0 last_line=''
+        while true; do
+            line=''
+            if IFS= read -t 0.12 -r -u "$fd" line; then
+                (( asking )) && { ask_end; asking=0; }
+                [[ -n $pending ]] && { line="$pending$line"; pending=''; }
+                stall=0
+                case "$line" in __RC__*__) lrc=${line#__RC__}; lrc=${lrc%__}; continue;; esac
+                printf '%s\n' "$line" >>"$log"
+                last_line="$line"
+                [[ $line =~ ([0-9]+)%[^0-9]*$ ]] && cur_pct=${BASH_REMATCH[1]}
+            else
+                (( $? > 128 )) || break
+                if [[ -n $line ]]; then
+                    pending+="$line"; stall=0
+                else
+                    poll_prompt "$label" pending stall asking last_line "$log"
+                fi
+            fi
+            (( asking )) && continue           # UI frozen while the user answers
+            local sd=$(( (idx - 1) * 1000 + cur_pct * 10 ))
+            render_live "${SPIN[i%6]}" "$label" "$(fmt_time $(( SECONDS - start )))" \
+                "Flash $idx/$N: $name" "$sd" "$(( N * 1000 ))"
+            draw_total_footer $(( lo + (hi - lo) * sd / (N * 1000) ))
+            i=$(( i + 1 ))
+        done
+        exec {fd}<&-
+        (( asking )) && { ask_end; asking=0; }
+        [[ -n $pending ]] && printf '%s\n' "$pending" >>"$log"
+        (( lrc != 0 && lrc != 2 )) && rc=1     # 2 = fwupd found nothing to do
+    done
+
+    draw_total_footer "$hi"
+    if (( rc == 0 )); then
+        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 ))
+    else
+        finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
+    fi
+    rm -f "$log"
+}
+
+#== Staged offline updates (Discover / GNOME Software) =======================
+# Those front-ends do not install updates live: they download them and leave a
+# transaction staged behind /system-update, so the packages are only applied on
+# the next boot — which is why they look like "updates that need a reboot" and
+# why this pipeline never saw them. Since we install the very same packages
+# live, a few lines below, the staged copy is stale: clearing it up front avoids
+# a pointless (and possibly failing) offline transaction at the next boot.
+_clear_offline() {
+    # whichever front-end staged it, only one of these two owns the transaction
+    sudo env LC_ALL=C dnf offline clean || true
+    command -v pkcon >/dev/null 2>&1 && { sudo env LC_ALL=C pkcon offline-cancel || true; }
+    [ -e /system-update ] && sudo rm -f /system-update
+    [ ! -e /system-update ]                  # the step is done when the trigger is gone
+}
+
+#== Reboot detection =========================================================
+# Fill REBOOT_REASONS with everything that only takes effect after a restart.
+detect_reboot_needed() {
+    REBOOT_REASONS=()
+
+    # kernel: newest installed vs the one actually running
+    local newest running
+    running=$(uname -r)
+    newest=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null | sort -V | tail -1)
+    [[ -n $newest && $newest != "$running" ]] && REBOOT_REASONS+=("new kernel installed: $newest")
+
+    # core libraries / services updated since boot — dnf's own verdict. rc 1 is
+    # its "yes", so require the list too: an rc 1 that printed nothing is an
+    # error, not a reboot. No sudo, or a sudo failure would read as a "yes".
+    local nr_out nr_rc
+    nr_out=$(env LC_ALL=C dnf --cacheonly needs-restarting 2>/dev/null); nr_rc=$?
+    if (( nr_rc == 1 )) && [[ -n $nr_out ]]; then
+        REBOOT_REASONS+=("core libraries or services updated since boot")
+    fi
+
+    # firmware staged by fwupd, applied by the firmware itself at the next boot
+    if command -v fwupdmgr >/dev/null 2>&1 &&
+       env LC_ALL=C fwupdmgr check-reboot-needed >/dev/null 2>&1; then
+        REBOOT_REASONS+=("firmware update waiting to be applied at boot")
+    fi
+
+    (( ${#REBOOT_REASONS[@]} > 0 ))
+}
+
+#== Yes/no question asked by the script itself ===============================
+ask_yes_no() {
+    local prompt="$1" ans
+    printf '\e[?25h'
+    read -r -p "$(printf '   %s◈%s  %s %s[y/N]%s ' "$GOLD" "$RESET" "$prompt" "$DIM" "$RESET")" ans
+    printf '\e[?25l'
+    [[ $ans =~ ^([yY]|[yY][eE][sS]|[sS]|[sS][iI])$ ]]
 }
 
 #== Report card =============================================================
@@ -575,6 +826,9 @@ report_card() {
     else
         card_line "Space used"   "$(kb_to_human "$(( -freed ))")" "$GOLD$BOLD"
     fi
+    if (( ${#REBOOT_REASONS[@]} > 0 )) || (( SYSUP_STAGED )); then
+        card_line "Reboot required" "yes" "$GOLD$BOLD"
+    fi
     card_line "Script update" "$SCRIPT_UPDATE"            "$BOLD"
 
     printf '  %s╰%s╯%s\n' "$CYAN" "$rule" "$RESET"
@@ -610,12 +864,21 @@ START_AVAIL=$(df --output=avail / | tail -1 | tr -d ' ')
 # Resolve everything first (one metadata refresh), so the TOTAL bar is exact.
 plan_phase
 
+# A staged offline transaction (Discover's "update and restart") holds the very
+# packages the live upgrade below is about to install: drop it first.
+if (( OFFLINE_PENDING )); then
+    run_step "Clearing the staged offline update (installed live below)" _clear_offline
+fi
+
 # The upgrade reuses the metadata just refreshed during planning (no --refresh).
 # Each step is handed its slice of the TOTAL bar computed in plan_phase.
-run_dnf      "System upgrade (DNF)"        "Install" 0          "$B_DLU_HI" "$B_DLU_HI" "$B_INU_HI" sudo env LC_ALL=C dnf upgrade -y
-run_dnf      "Removing orphaned packages"  "Remove"  "$B_INU_HI" "$B_INU_HI" "$B_INU_HI" "$B_INA_HI" sudo env LC_ALL=C dnf autoremove -y
+run_dnf      "System upgrade (DNF)"        "Install" 0          "$B_DLU_HI" "$B_DLU_HI" "$B_INU_HI" sudo "${UNBUF[@]}" env LC_ALL=C dnf upgrade -y
+run_dnf      "Removing orphaned packages"  "Remove"  "$B_INU_HI" "$B_INU_HI" "$B_INU_HI" "$B_INA_HI" sudo "${UNBUF[@]}" env LC_ALL=C dnf autoremove -y
 run_flatpak  "Updating Flatpaks"           update "$B_INA_HI" "$B_FPU_HI" "${FU_REFS[@]}"
-run_flatpak  "Removing unused Flatpaks"    remove "$B_FPU_HI" 1000         "${FX_REFS[@]}"
+run_flatpak  "Removing unused Flatpaks"    remove "$B_FPU_HI" "$B_FPX_HI" "${FX_REFS[@]}"
+# Firmware last: dnf may have just updated fwupd itself. It runs interactively —
+# any question it asks is surfaced and handed to the user.
+run_fw       "Firmware update (fwupd)"     "$B_FPX_HI" 1000     "${FW_IDS[@]}"
 
 # Optional hook: cromup (Cromite) — excluded from the overall progress bar
 if [ -x /usr/local/bin/cromup ]; then
@@ -624,6 +887,9 @@ fi
 
 END_AVAIL=$(df --output=avail / | tail -1 | tr -d ' ')
 teardown_footer
+
+# Everything that only takes effect after a restart (kernel, core libs, firmware)
+detect_reboot_needed || true
 
 #== Script self-update ======================================================
 if curl -fsSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/aggiorna -o /tmp/aggiorna.tmp 2>/dev/null; then
@@ -642,8 +908,70 @@ else
     SCRIPT_UPDATE='not checked'
 fi
 
-#== Report + exit ===========================================================
+#== Report ==================================================================
 report_card
+
+#== Reboot-class updates ====================================================
+if (( ${#REBOOT_REASONS[@]} > 0 )); then
+    printf '   %s⟳  A REBOOT IS REQUIRED to complete this update:%s\n' "$GOLD$BOLD" "$RESET"
+    for reason in "${REBOOT_REASONS[@]}"; do
+        printf '      %s•%s %s\n' "$GOLD" "$RESET" "$reason"
+    done
+    echo
+fi
+
+#== Optional Fedora version jump (offered last, once everything else is done) =
+if [ -n "$NEXT_REL" ]; then
+    CUR_REL=$(rpm -E %fedora)
+    printf '   %s▲  Fedora %s is out — this system is on Fedora %s.%s\n' \
+        "$CYAN$BOLD" "$NEXT_REL" "$CUR_REL" "$RESET"
+    printf '      %sThe jump downloads the whole new release now and installs it during a reboot.%s\n' \
+        "$DIM" "$RESET"
+    printf '      %sIt is optional: everything above is already up to date without it.%s\n' \
+        "$DIM" "$RESET"
+    if ask_yes_no "Upgrade to Fedora $NEXT_REL?"; then
+        echo
+        fails_before=$steps_fail
+        NO_AUTOREPAIR=1                    # a depsolve refusal here is an answer, not damage
+        setup_footer; FIRST_STEP=1; G_TOTAL_PKG=0
+        run_dnf "Downloading Fedora $NEXT_REL" "Install" 0 900 900 1000 \
+            sudo "${UNBUF[@]}" env LC_ALL=C dnf -y --releasever="$NEXT_REL" system-upgrade download
+        teardown_footer
+        NO_AUTOREPAIR=0
+        if (( steps_fail == fails_before )); then
+            SYSUP_STAGED=1
+        else
+            printf '\n      %sThe download failed. Third-party packages with no Fedora %s build are\n' \
+                "$DIM" "$NEXT_REL"
+            printf '      the usual cause; retry by hand with:%s\n' "$RESET"
+            printf '      %ssudo dnf --releasever=%s --allowerasing system-upgrade download%s\n\n' \
+                "$BOLD" "$NEXT_REL" "$RESET"
+        fi
+    else
+        printf '      %sSkipped — staying on Fedora %s.%s\n\n' "$DIM" "$CUR_REL" "$RESET"
+    fi
+fi
+
+#== Reboot proposal =========================================================
+if (( SYSUP_STAGED )); then
+    printf '   %s⟳  Fedora %s is downloaded; the upgrade itself runs during the reboot.%s\n' \
+        "$GOLD$BOLD" "$NEXT_REL" "$RESET"
+    if ask_yes_no "Reboot now and install Fedora $NEXT_REL?"; then
+        printf '\n   %sRebooting…%s\n' "$DIM" "$RESET"
+        sudo env LC_ALL=C dnf system-upgrade reboot
+        exit 0
+    fi
+    printf '      %sWhen you are ready: sudo dnf system-upgrade reboot%s\n\n' "$DIM" "$RESET"
+elif (( ${#REBOOT_REASONS[@]} > 0 )); then
+    if ask_yes_no "Reboot now?"; then
+        printf '\n   %sRebooting…%s\n' "$DIM" "$RESET"
+        sudo systemctl reboot
+        exit 0
+    fi
+    printf '      %sRemember to reboot to finish applying the update.%s\n\n' "$DIM" "$RESET"
+fi
+
+#== Exit ====================================================================
 printf '\e[?25h'
 read -r -p "$(printf '   %s↵ Press ENTER to close%s' "$DIM" "$RESET")"
 clear
