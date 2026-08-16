@@ -4,6 +4,21 @@ Copia e incolla nel terminale il comando sottostante (accertati di essere nella 
 `curl -sSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/install | bash`  
 Adesso avrai un comando nuovo nel terminale - `aggiorna` - che quando lo lancerai aggiornerà tutte le app installate con DNF e FLATPAK e farà anche pulizia dei file e dipendenze obsolete.
 
+## ⚠️ Disclaimer — leggi prima di usarlo
+
+`aggiorna` modifica il sistema: installa aggiornamenti di pacchetti, di Flatpak e di **firmware**, e su richiesta può far passare Fedora a una **nuova versione**.
+
+Due funzioni **non sono ancora state provate su un caso reale**, ma soltanto con comandi simulati:
+
+- il **passaggio a una nuova versione di Fedora** (`dnf system-upgrade`);
+- la gestione degli **aggiornamenti messi in coda per l'installazione al riavvio** (gli "offline updates" di Discover / GNOME Software).
+
+Del loro buon funzionamento **non posso dare garanzia**.
+
+Lo script è fornito **così com'è, senza alcuna garanzia di alcun tipo**. L'autore **non si assume alcuna responsabilità** per danni, perdita di dati, sistemi resi non avviabili o qualunque altro problema derivante da un aggiornamento andato male. Usalo a tuo rischio, e **se hai dati importanti fai un backup prima**.
+
+Lo stesso avviso compare all'avvio del comando, che chiede conferma prima di toccare qualsiasi cosa: rispondendo qualunque cosa diversa da `y`/`s` lo script esce senza modificare nulla.
+
 ## Interfaccia
 `aggiorna` ha un'interfaccia originale, pensata per essere chiara e gradevole nel terminale:
 
@@ -17,8 +32,8 @@ Adesso avrai un comando nuovo nel terminale - `aggiorna` - che quando lo lancera
 Sono quelli che le interfacce grafiche (Discover, GNOME Software) mostrano a parte, con l'avviso di riavviare. `aggiorna` li gestisce tutti:
 
 - **Firmware (fwupd)**: BIOS/UEFI, dbx del Secure Boot, firmware di SSD e periferiche. Vengono installati nella pipeline come gli altri passi; il firmware vero e proprio si applica al riavvio successivo. fwupd viene lanciato **senza** risposta automatica: le sue domande arrivano a te.
-- **Aggiornamenti offline già in coda**: se Discover ha messo in attesa dei pacchetti da installare al boot, quella coda viene annullata e gli stessi pacchetti vengono installati subito, dal vivo.
-- **Salto di versione di Fedora** (es. 44 → 45): è **opzionale** e viene proposto per ultimo, quando tutto il resto è già aggiornato. Se accetti, la nuova release viene scaricata e installata durante un riavvio.
+- **Aggiornamenti offline già in coda** ⚠️ *non ancora testato su un caso reale*: se Discover ha messo in attesa dei pacchetti da installare al boot, quella coda viene annullata e gli stessi pacchetti vengono installati subito, dal vivo.
+- **Salto di versione di Fedora** (es. 44 → 45) ⚠️ *non ancora testato su un caso reale*: è **opzionale** e viene proposto per ultimo, quando tutto il resto è già aggiornato. Se accetti, la nuova release viene scaricata e installata durante un riavvio.
 
 Alla fine lo script dice **perché** serve un riavvio (nuovo kernel, librerie di sistema aggiornate, firmware in attesa) e **propone di riavviare** — la decisione resta tua.
 
