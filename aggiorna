@@ -755,6 +755,16 @@ _clear_offline() {
 }
 
 #== Reboot detection =========================================================
+# Packages whose update genuinely only takes effect after a restart — dnf4's
+# `needs-restarting -r` list, minus the kernel (handled separately, by version).
+#
+# dnf5's own needs-restarting is NOT usable as the verdict: it announces "core
+# libraries or services have been updated since boot-up" and then lists every
+# package updated since boot — grub2, icon themes, kf6 libraries and all. That
+# turns into "reboot required" after any update whatsoever, which is noise: a
+# reboot notice nobody can trust is worse than no notice.
+REBOOT_CORE_PKGS='^(glibc|systemd|systemd-libs|systemd-udev|systemd-shared|dbus|dbus-broker|dbus-daemon|dbus-common|linux-firmware|microcode_ctl)$'
+
 # Fill REBOOT_REASONS with everything that only takes effect after a restart.
 detect_reboot_needed() {
     REBOOT_REASONS=()
@@ -765,14 +775,15 @@ detect_reboot_needed() {
     newest=$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-core 2>/dev/null | sort -V | tail -1)
     [[ -n $newest && $newest != "$running" ]] && REBOOT_REASONS+=("new kernel installed: $newest")
 
-    # core libraries / services updated since boot — dnf's own verdict. rc 1 is
-    # its "yes", so require the list too: an rc 1 that printed nothing is an
-    # error, not a reboot. No sudo, or a sudo failure would read as a "yes".
-    local nr_out nr_rc
-    nr_out=$(env LC_ALL=C dnf --cacheonly needs-restarting 2>/dev/null); nr_rc=$?
-    if (( nr_rc == 1 )) && [[ -n $nr_out ]]; then
-        REBOOT_REASONS+=("core libraries or services updated since boot")
-    fi
+    # core packages whose files were replaced after this boot: the running
+    # processes still hold the old ones until the machine restarts
+    local boot_epoch core
+    boot_epoch=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0) ))
+    core=$(rpm -qa --qf '%{INSTALLTIME} %{NAME}\n' 2>/dev/null |
+           awk -v b="$boot_epoch" '$1 > b { print $2 }' |
+           grep -E "$REBOOT_CORE_PKGS" | sort -u | tr '\n' ' ')
+    core=${core% }
+    [[ -n $core ]] && REBOOT_REASONS+=("core packages updated since boot: $core")
 
     # firmware staged by fwupd, applied by the firmware itself at the next boot
     if command -v fwupdmgr >/dev/null 2>&1 &&
