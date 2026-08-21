@@ -37,3 +37,13 @@ Sono quelli che le interfacce grafiche (Discover, GNOME Software) mostrano a par
 Alla fine lo script dice **perché** serve un riavvio (nuovo kernel, librerie di sistema aggiornate, firmware in attesa) e **propone di riavviare** — la decisione resta tua.
 
 Operazioni eseguite: `dnf upgrade`, `dnf autoremove`, `flatpak update`, `flatpak uninstall --unused`, `fwupdmgr update`, l'hook opzionale `cromup` (se presente), l'autoaggiornamento dello script stesso e, su richiesta, `dnf system-upgrade` per il salto di versione.
+
+## Se sembra piantato
+
+L'output dei comandi normalmente viene buttato via a fine passo, quindi di un blocco non resta traccia. Per averla:
+
+```
+AGGIORNA_DEBUG=1 aggiorna
+```
+
+Tiene un diario in `/tmp/aggiorna-debug-<pid>/`: una riga con l'ora a ogni passo e a ogni domanda (con la risposta data), più l'output completo di ogni comando. Se lo script si ferma, l'ultima riga del diario dice esattamente dove era arrivato e da quanto tempo era lì. Il percorso viene stampato anche a fine esecuzione.

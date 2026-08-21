@@ -57,6 +57,36 @@ SPIN=('◜' '◠' '◝' '◞' '◡' '◟')   # rotating arc (not braille!)
 TERM_ROWS=24
 TERM_COLS=80
 
+#== Diario di bordo (facoltativo) ===========================================
+# `AGGIORNA_DEBUG=1 aggiorna` tiene un diario in /tmp/aggiorna-debug-<pid>/:
+# una riga con l'ora a ogni passo e a ogni domanda, più l'output completo di
+# ogni comando, che di norma viene buttato via appena il passo finisce.
+#
+# Serve per una cosa sola, ma importante: quando lo script *sembra* fermo e lo
+# schermo non dice perché, il diario dice a che punto era arrivato, a che ora, e
+# che cosa stava aspettando. Senza, di un blocco non resta alcuna traccia.
+DEBUG_DIR=''
+if [ -n "${AGGIORNA_DEBUG:-}" ]; then
+    DEBUG_DIR="/tmp/aggiorna-debug-$$"
+    mkdir -p "$DEBUG_DIR" 2>/dev/null || DEBUG_DIR=''
+fi
+
+trace() {
+    [ -n "$DEBUG_DIR" ] || return 0
+    printf '%s  %s\n' "$(date '+%H:%M:%S')" "$1" >> "$DEBUG_DIR/diario.txt"
+}
+
+# Fine di un passo: butta il log com'e' sempre stato, ma se il diario e' attivo
+# lo conserva prima, con il nome del passo.
+drop_log() {
+    local log=$1 label=$2
+    if [ -n "$DEBUG_DIR" ] && [ -s "$log" ]; then
+        cp "$log" "$DEBUG_DIR/$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_').log" 2>/dev/null
+    fi
+    trace "fine:   $label"
+    rm -f "$log"
+}
+
 #== Utilities ================================================================
 
 # repeat a (possibly multibyte) character n times
@@ -301,6 +331,7 @@ poll_prompt() {
 run_step() {
     local label="$1"; shift
     local log; log=$(mktemp)
+    trace "inizio: $label"
     connector
     # <&0 is not decoration: bash gives an asynchronous command /dev/null for
     # stdin, so without it the command would hit EOF the moment it asked
@@ -340,7 +371,7 @@ run_step() {
         steps_fail=$(( steps_fail + 1 ))
         error_box "$log"
     fi
-    rm -f "$log"
+    drop_log "$log" "$label"
 }
 
 #== Planning: resolve every section up-front so the TOTAL is known ============
@@ -514,6 +545,7 @@ run_dnf() {
     local label="$1" p2="$2" dl_lo="$3" dl_hi="$4" in_lo="$5" in_hi="$6"; shift 6
     local cmd=("$@")
     local log; log=$(mktemp)
+    trace "inizio: $label"
     connector
 
     local re='^\[[[:space:]]*([0-9]+)/[[:space:]]*([0-9]+)\][[:space:]]+(.*)$'
@@ -609,7 +641,7 @@ run_dnf() {
     else
         finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
     fi
-    rm -f "$log"
+    drop_log "$log" "$label"
 }
 
 #== Flatpak section: update or remove one ref at a time ======================
@@ -619,6 +651,7 @@ run_flatpak() {
     local label="$1" mode="$2" lo="$3" hi="$4"; shift 4
     local refs=("$@") N=$#
     local log; log=$(mktemp)
+    trace "inizio: $label"
     connector
 
     local verb; [[ $mode == update ]] && verb=Update || verb=Remove
@@ -626,7 +659,7 @@ run_flatpak() {
     if (( N == 0 )); then
         render_live "${SPIN[0]}" "$label" '00:00' 'nothing to do' 1 1
         draw_total_footer "$hi"
-        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 )); rm -f "$log"; return
+        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 )); drop_log "$log" "$label"; return
     fi
 
     local rc=0 start=$SECONDS i=0 idx=0 ref
@@ -678,7 +711,7 @@ run_flatpak() {
     else
         finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
     fi
-    rm -f "$log"
+    drop_log "$log" "$label"
 }
 
 #== Firmware section (fwupd) =================================================
@@ -708,12 +741,13 @@ run_fw() {
     local label="$1" lo="$2" hi="$3"; shift 3
     local ids=("$@") N=$#
     local log; log=$(mktemp)
+    trace "inizio: $label"
     connector
 
     if (( N == 0 )); then
         render_live "${SPIN[0]}" "$label" '00:00' 'no firmware updates' 1 1
         draw_total_footer "$hi"
-        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 )); rm -f "$log"; return
+        finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 )); drop_log "$log" "$label"; return
     fi
 
     local rc=0 start=$SECONDS i=0 idx=0 id
@@ -765,7 +799,7 @@ run_fw() {
     else
         finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
     fi
-    rm -f "$log"
+    drop_log "$log" "$label"
 }
 
 #== Staged offline updates (Discover / GNOME Software) =======================
@@ -848,11 +882,13 @@ ask_read() {
 
 ask_yes_no() {
     local prompt="$1" ans
+    trace "chiedo: $prompt"
     printf '\e[?25h'
     printf '\a'                                   # una domanda si deve anche sentire
     printf '   %s◈%s  %s %s[y/N]%s ' "$GOLD" "$RESET" "$prompt" "$DIM" "$RESET"
     ask_read ans
     printf '\e[?25l'
+    trace "risposta: '$ans'"
     [[ $ans =~ ^([yY]|[yY][eE][sS]|[sS]|[sS][iI])$ ]]
 }
 
@@ -942,6 +978,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 #== START ===================================================================
+trace "avvio ($(uname -r), Fedora $(rpm -E %fedora 2>/dev/null), TERM=${TERM:-?}, stdin tty: $([ -t 0 ] && echo si || echo no))"
 clear
 setup_footer
 header
@@ -989,11 +1026,27 @@ fi
 END_AVAIL=$(df --output=avail / | tail -1 | tr -d ' ')
 teardown_footer
 
+# Fra l'ultimo nodo della pipeline e la scheda di resoconto ci sono due passi
+# che non disegnano niente: l'analisi del riavvio (che interroga tutto l'rpmdb,
+# appena riscritto da dnf) e l'autoaggiornamento via rete. Se uno dei due va per
+# le lunghe, lo schermo resta fermo sull'ultimo nodo senza spiegare perché — e
+# uno schermo fermo e muto è indistinguibile da uno script piantato. Una riga,
+# almeno, dice a che punto siamo.
+printf '   %s┃%s\n' "$DIM" "$RESET"
+printf '   %s⋯  controlli finali e autoaggiornamento…%s\n' "$DIM" "$RESET"
+
 # Everything that only takes effect after a restart (kernel, core libs, firmware)
+trace "inizio: analisi riavvio"
 detect_reboot_needed || true
+trace "fine:   analisi riavvio (${#REBOOT_REASONS[@]} motivi)"
 
 #== Script self-update ======================================================
-if curl -fsSL https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/aggiorna -o /tmp/aggiorna.tmp 2>/dev/null; then
+# Timeout espliciti: senza, un mirror che non risponde lascia curl appeso a
+# tempo indefinito proprio qui, con lo schermo che non dice niente. L'altra
+# sonda di rete (next_release) un --max-time ce l'aveva già.
+trace "inizio: autoaggiornamento"
+if curl -fsSL --connect-timeout 10 --max-time 60 \
+        https://raw.githubusercontent.com/RootGPT-YouTube/FedoraUP/main/aggiorna -o /tmp/aggiorna.tmp 2>/dev/null; then
     if ! cmp -s /tmp/aggiorna.tmp /usr/local/bin/aggiorna 2>/dev/null; then
         if sudo mv /tmp/aggiorna.tmp /usr/local/bin/aggiorna && sudo chmod a+x /usr/local/bin/aggiorna; then
             SCRIPT_UPDATE='updated ✓'
@@ -1008,6 +1061,7 @@ else
     rm -f /tmp/aggiorna.tmp
     SCRIPT_UPDATE='not checked'
 fi
+trace "fine:   autoaggiornamento ($SCRIPT_UPDATE)"
 
 #== Report ==================================================================
 report_card
@@ -1073,8 +1127,11 @@ elif (( ${#REBOOT_REASONS[@]} > 0 )); then
 fi
 
 #== Exit ====================================================================
+trace "uscita normale"
+[ -n "$DEBUG_DIR" ] && printf '   %sDiario di questa esecuzione: %s%s\n' "$DIM" "$DEBUG_DIR" "$RESET"
 printf '\e[?25h'
 printf '   %s↵ Press ENTER to close%s' "$DIM" "$RESET"
 ask_read _close
 clear
+[ -n "$DEBUG_DIR" ] && printf 'Diario di aggiorna: %s\n' "$DEBUG_DIR"
 # == End of script ==
