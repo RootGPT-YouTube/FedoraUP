@@ -266,6 +266,7 @@ ask_begin() {
     local label="$1" text="$2"
     (( LIVE_DRAWN )) && printf '\e[%dA' "$LIVE_LINES"
     LIVE_DRAWN=0
+    printf '\a'                                   # una domanda si deve anche sentire
     printf '\r   %s◈%s  %s%s — the command is asking:%s\e[K\n' \
         "$GOLD" "$RESET" "$GOLD$BOLD" "$label" "$RESET"
     printf '\r      %s│%s %s\e[K\n' "$GOLD" "$RESET" "$text"
@@ -684,11 +685,25 @@ run_flatpak() {
 # run_fw "Label" lo hi device-id...
 # Flashes one device at a time, filling the TOTAL bar's [lo,hi] band.
 #
-# fwupd is deliberately run WITHOUT --assume-yes: its questions ("Perform
-# operation?", a vendor warning to acknowledge, a branch switch) are real
-# decisions and must reach the user. They do — the prompt detector surfaces them
-# and hands over the keyboard, exactly like any other step. The only forced flag
-# is --no-reboot-check, because the reboot is proposed once, at the very end.
+# ATTENZIONE — qui fwupd NON fa domande, e non è una scelta di questo script.
+#
+# fwupd decide se è "interattivo" guardando soltanto il proprio stdout
+# (fu_console_setup → isatty(stdout)). Qui lo stdout è la pipe che alimenta
+# questa interfaccia, quindi si dichiara non interattivo e in quel ramo (main(),
+# src/fu-util.c) accende da solo no_safety_check, no_reboot_check,
+# no_metadata_check, no_unreported_check e no_device_prompt. Ogni domanda di
+# `fwupdmgr update` sta dietro a uno di quei flag, quindi non ne viene posta
+# nessuna: né l'avviso del produttore ("il dispositivo deve restare collegato",
+# l'avviso sulla cifratura del disco), né "Perform operation?", né la proposta
+# di riavvio. Il rilevatore di prompt, su questa sezione, non vedrà mai niente.
+#
+# Quindi: il firmware viene installato senza conferma, e senza mostrare gli
+# avvisi del produttore. L'unico modo per riaverli sarebbe dare a fwupd un
+# terminale vero (un pty), non un flag.
+#
+# --no-reboot-check resta scritto a mano anche se fwupd lo accenderebbe da sé:
+# il riavvio va proposto una volta sola, alla fine, e non deve dipendere da come
+# fwupd classifica il proprio stdout.
 run_fw() {
     local label="$1" lo="$2" hi="$3"; shift 3
     local ids=("$@") N=$#
@@ -808,11 +823,35 @@ detect_reboot_needed() {
     (( ${#REBOOT_REASONS[@]} > 0 ))
 }
 
-#== Yes/no question asked by the script itself ===============================
+#== Domande sì/no poste dallo script stesso ==================================
+# Il prompt non viene affidato a `read -p`. Bash stampa il prompt di `read -p`
+# soltanto quando lo stdin del read è un terminale, e lo manda su stderr: basta
+# che lo script venga lanciato con stdin diverso dal terminale (una pipe, un
+# redirect, un lanciatore che passa stdin altrove) perché la domanda sparisca
+# del tutto mentre il read continua ad aspettare. È il modo peggiore di
+# sbagliare: si resta fermi davanti a uno schermo muto, a rispondere alla cieca.
+# Qui il prompt lo stampiamo noi, e la risposta la leggiamo dal terminale vero.
+#
+# ask_read <variabile> — legge una riga dal terminale, non da stdin. Se non
+# esiste un terminale di controllo ripiega su stdin; se non c'è nemmeno quello
+# la risposta resta vuota (che per una domanda y/N vuol dire "no", la scelta
+# prudente) invece di bloccare lo script per sempre.
+ask_read() {
+    local -n _ans=$1
+    _ans=''
+    if [ -r /dev/tty ]; then
+        IFS= read -r _ans < /dev/tty || _ans=''
+    else
+        IFS= read -r _ans || _ans=''
+    fi
+}
+
 ask_yes_no() {
     local prompt="$1" ans
     printf '\e[?25h'
-    read -r -p "$(printf '   %s◈%s  %s %s[y/N]%s ' "$GOLD" "$RESET" "$prompt" "$DIM" "$RESET")" ans
+    printf '\a'                                   # una domanda si deve anche sentire
+    printf '   %s◈%s  %s %s[y/N]%s ' "$GOLD" "$RESET" "$prompt" "$DIM" "$RESET"
+    ask_read ans
     printf '\e[?25l'
     [[ $ans =~ ^([yY]|[yY][eE][sS]|[sS]|[sS][iI])$ ]]
 }
@@ -937,8 +976,9 @@ run_dnf      "System upgrade (DNF)"        "Install" 0          "$B_DLU_HI" "$B_
 run_dnf      "Removing orphaned packages"  "Remove"  "$B_INU_HI" "$B_INU_HI" "$B_INU_HI" "$B_INA_HI" sudo "${UNBUF[@]}" env LC_ALL=C dnf autoremove -y
 run_flatpak  "Updating Flatpaks"           update "$B_INA_HI" "$B_FPU_HI" "${FU_REFS[@]}"
 run_flatpak  "Removing unused Flatpaks"    remove "$B_FPU_HI" "$B_FPX_HI" "${FX_REFS[@]}"
-# Firmware last: dnf may have just updated fwupd itself. It runs interactively —
-# any question it asks is surfaced and handed to the user.
+# Firmware last: dnf may have just updated fwupd itself. Il firmware viene
+# installato senza conferma e senza gli avvisi del produttore: fwupd li
+# disattiva da sé quando il suo stdout non è un terminale (vedi run_fw).
 run_fw       "Firmware update (fwupd)"     "$B_FPX_HI" 1000     "${FW_IDS[@]}"
 
 # Optional hook: cromup (Cromite) — excluded from the overall progress bar
@@ -1034,6 +1074,7 @@ fi
 
 #== Exit ====================================================================
 printf '\e[?25h'
-read -r -p "$(printf '   %s↵ Press ENTER to close%s' "$DIM" "$RESET")"
+printf '   %s↵ Press ENTER to close%s' "$DIM" "$RESET"
+ask_read _close
 clear
 # == End of script ==
