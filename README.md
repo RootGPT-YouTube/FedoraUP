@@ -36,6 +36,12 @@ Sono quelli che le interfacce grafiche (Discover, GNOME Software) mostrano a par
 
 Alla fine lo script dice **perché** serve un riavvio (nuovo kernel, librerie di sistema aggiornate, firmware in attesa) e **propone di riavviare** — la decisione resta tua.
 
+### Flatpak che non si aggiornano (delta rotti)
+
+Per risparmiare banda, Flathub distribuisce le differenze fra due versioni (i *delta statici*) invece dei pacchetti interi. Quando un delta è più grande del limite di ostree, l'aggiornamento si ferma a metà con un errore del tipo `Decompressed delta part exceeds configured limit of ... bytes` (è capitato con *Bottles*): non dipende dal tuo sistema né dalla rete, ed è un errore che si ripete identico a ogni tentativo finché Flathub non rigenera quel delta.
+
+`aggiorna` se ne accorge da solo: riconosce l'errore e rilancia subito quel singolo Flatpak con `--no-static-deltas`, cioè scaricando gli oggetti interi. Si consuma un po' più di banda, ma l'app si aggiorna e il passo resta verde. Se anche il secondo tentativo fallisce, l'errore viene mostrato com'è.
+
 Operazioni eseguite: `dnf upgrade`, `dnf autoremove`, `flatpak update`, `flatpak uninstall --unused`, `fwupdmgr update`, l'hook opzionale `cromup` (se presente), l'autoaggiornamento dello script stesso e, su richiesta, `dnf system-upgrade` per il salto di versione.
 
 ## Se sembra piantato

@@ -395,6 +395,27 @@ flatpak_refs() {
     fi | awk -F'\t' '/^[[:space:]]*[0-9]+\./ { gsub(/^[ \t]+|[ \t]+$/,"",$3); if ($3!="") print $3 }'
 }
 
+# Vero se l'ultima passata di `flatpak update` (le righe del log dopo la riga
+# numero $2) e' morta sui delta statici del remoto.
+#
+# Un delta statico e' il "pacchetto differenza" che flathub prepara fra due
+# versioni: si scarica al posto dell'intero, ed e' molto piu' leggero. Ostree
+# pero' rifiuta una parte di delta piu' grande del proprio limite
+# (max-delta-part-size / OSTREE_MAX_DELTA_PART_SIZE) e si ferma a meta' pull:
+#
+#   Error: While pulling app/com.usebottles.bottles/x86_64/stable from remote
+#   flathub: Decompressed delta part exceeds configured limit of 4537824 bytes
+#
+# Non e' un guasto del sistema locale ne' della rete: e' quel delta a essere
+# fuori misura, e resta rotto a ogni tentativo finche' flathub non lo rigenera.
+# La via d'uscita e' --no-static-deltas, che ignora la differenza e si porta
+# giu' gli oggetti interi: piu' banda, ma l'aggiornamento passa.
+flatpak_delta_failure() {
+    local log=$1 mark=$2
+    tail -n "+$(( mark + 1 ))" "$log" 2>/dev/null |
+        grep -Eqi 'delta (part|superblock)|static delta|delta.*(exceed|invalid|corrupt)'
+}
+
 # Devices with a pending firmware update, one "DeviceId<TAB>Name" line each.
 # fwupd stages most updates and applies them at the next boot, which is exactly
 # the class of update the pipeline used to skip.
@@ -665,43 +686,58 @@ run_flatpak() {
     local rc=0 start=$SECONDS i=0 idx=0 ref
     for ref in "${refs[@]}"; do
         idx=$(( idx + 1 ))
-        local cur_pct=0 lrc=0 fd
-        if [[ $mode == update ]]; then
-            exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak update -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
-        else
-            exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak uninstall -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
-        fi
-        local pending='' stall=0 asking=0 last_line=''
+        # Un ref puo' richiedere due passate: la seconda e' il ritiro dei delta
+        # statici (vedi flatpak_delta_failure), e riparte da capo col flag in piu'.
+        local lrc=0 attempt=1 extra=() note='' mark=0
         while true; do
-            line=''
-            if IFS= read -t 0.12 -r -u "$fd" line; then
-                (( asking )) && { ask_end; asking=0; }
-                [[ -n $pending ]] && { line="$pending$line"; pending=''; }
-                stall=0
-                case "$line" in __RC__*__) lrc=${line#__RC__}; lrc=${lrc%__}; continue;; esac
-                printf '%s\n' "$line" >>"$log"
-                last_line="$line"
-                [[ $line =~ ([0-9]+)%[^0-9]*$ ]] && cur_pct=${BASH_REMATCH[1]}
+            local cur_pct=0 fd
+            lrc=0
+            mark=$(wc -l <"$log")
+            if [[ $mode == update ]]; then
+                exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak update -y "${extra[@]}" "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
             else
-                (( $? > 128 )) || break
-                # timeout: read leaves any newline-less partial input in $line —
-                # a line that then stays unfinished is a prompt awaiting an answer
-                if [[ -n $line ]]; then
-                    pending+="$line"; stall=0
-                else
-                    poll_prompt "$label" pending stall asking last_line "$log"
-                fi
+                exec {fd}< <( { "${UNBUF[@]}" env LC_ALL=C flatpak uninstall -y "$ref"; printf '\n__RC__%d__\n' "$?"; } 2>&1 )
             fi
-            (( asking )) && continue           # UI frozen while the user answers
-            local sd=$(( (idx - 1) * 1000 + cur_pct * 10 ))
-            render_live "${SPIN[i%6]}" "$label" "$(fmt_time $(( SECONDS - start )))" \
-                "$verb $idx/$N: $ref" "$sd" "$(( N * 1000 ))"
-            draw_total_footer $(( lo + (hi - lo) * sd / (N * 1000) ))
-            i=$(( i + 1 ))
+            local pending='' stall=0 asking=0 last_line=''
+            while true; do
+                line=''
+                if IFS= read -t 0.12 -r -u "$fd" line; then
+                    (( asking )) && { ask_end; asking=0; }
+                    [[ -n $pending ]] && { line="$pending$line"; pending=''; }
+                    stall=0
+                    case "$line" in __RC__*__) lrc=${line#__RC__}; lrc=${lrc%__}; continue;; esac
+                    printf '%s\n' "$line" >>"$log"
+                    last_line="$line"
+                    [[ $line =~ ([0-9]+)%[^0-9]*$ ]] && cur_pct=${BASH_REMATCH[1]}
+                else
+                    (( $? > 128 )) || break
+                    # timeout: read leaves any newline-less partial input in $line —
+                    # a line that then stays unfinished is a prompt awaiting an answer
+                    if [[ -n $line ]]; then
+                        pending+="$line"; stall=0
+                    else
+                        poll_prompt "$label" pending stall asking last_line "$log"
+                    fi
+                fi
+                (( asking )) && continue           # UI frozen while the user answers
+                local sd=$(( (idx - 1) * 1000 + cur_pct * 10 ))
+                render_live "${SPIN[i%6]}" "$label" "$(fmt_time $(( SECONDS - start )))" \
+                    "$verb $idx/$N: $ref$note" "$sd" "$(( N * 1000 ))"
+                draw_total_footer $(( lo + (hi - lo) * sd / (N * 1000) ))
+                i=$(( i + 1 ))
+            done
+            exec {fd}<&-
+            (( asking )) && { ask_end; asking=0; }
+            [[ -n $pending ]] && printf '%s\n' "$pending" >>"$log"
+
+            (( lrc == 0 || attempt > 1 )) && break
+            [[ $mode == update ]] || break
+            flatpak_delta_failure "$log" "$mark" || break
+            attempt=2; extra=(--no-static-deltas); note=' (senza delta)'
+            printf '%s\n' "--- ritento senza delta statici: flatpak update -y --no-static-deltas $ref" >>"$log"
+            trace "delta rotto, ritento intero: $ref"
+            cur_pct=0
         done
-        exec {fd}<&-
-        (( asking )) && { ask_end; asking=0; }
-        [[ -n $pending ]] && printf '%s\n' "$pending" >>"$log"
         (( lrc != 0 )) && rc=1
     done
 
