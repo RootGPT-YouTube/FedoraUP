@@ -23,8 +23,9 @@ Nota, al momento: il **passaggio a una nuova versione di Fedora** e la gestione 
 
 - **Header a gradiente truecolor** con il titolo del progetto.
 - **Pipeline verticale**: ogni operazione è un nodo collegato (`●` completato, `✗` fallito) con uno spinner ad arco rotante e un timer mentre è in corso.
-- **Output pulito**: l'output dei comandi è nascosto durante l'esecuzione e mostrato in un riquadro **solo in caso di errore**.
-- **Domande interattive**: se un comando fa una domanda nel terminale (es. l'import di una chiave GPG), lo script se ne accorge, la mostra in un riquadro dedicato e ti passa la tastiera — la risposta digitata arriva direttamente al comando, poi la pipeline riprende. Vengono riconosciute sia le domande lasciate a metà riga sia quelle stampate con l'a capo, e i comandi girano senza buffering perché nessuna domanda possa restare invisibile. Le domande poste dallo script stesso non passano mai da `read -p` (che stampa il prompt solo se lo stdin è un terminale): il testo viene stampato direttamente e la risposta letta dal terminale, così una domanda non può restare muta.
+- **Output pulito**: l'output dei comandi è normalmente nascosto durante l'esecuzione; viene mostrato in caso di errore, di domanda o di silenzio prolungato.
+- **Domande interattive**: le domande riconosciute vengono mostrate dopo circa 2 secondi, insieme all'output recente (avvisi e opzioni). Il rilevatore ignora colori e controlli del terminale, conserva la domanda anche se seguono righe vuote e riconosce anche «Press ENTER»/«Premi INVIO», con o senza a capo. Se dopo circa 45 secondi non arriva nuovo output, viene mostrato comunque il contesto recente, in silenzio (il campanello suona solo per le domande vere): un comando lento non è necessariamente bloccato — DNF resta muto a lungo mentre risolve le dipendenze — quindi **rispondi solo se c'è una richiesta esplicita, altrimenti attendi**. Il ridisegno si sospende mentre il testo è visibile e riprende quando arriva nuovo output; nessuna risposta viene inviata automaticamente. `stdbuf`, se disponibile, limita il buffering dei programmi compatibili, ma non può recuperare una domanda che il sottocomando non stampa affatto. Le domande poste dallo script stesso vengono stampate direttamente, senza `read -p`, e la risposta viene letta dal terminale.
+- **Autenticazione**: la password viene chiesta all'inizio; i comandi privilegiati della pipeline e della pianificazione usano `sudo -n`, così un'eventuale scadenza delle credenziali non apre una richiesta di password nascosta. L'hook esterno `cromup` mantiene la propria gestione di `sudo`.
 - **Scheda di resoconto** finale con operazioni riuscite, tempo impiegato, spazio liberato su disco, necessità di riavvio ed esito dell'autoaggiornamento dello script.
 
 ## Aggiornamenti che richiedono il riavvio
@@ -53,3 +54,8 @@ AGGIORNA_DEBUG=1 aggiorna
 ```
 
 Tiene un diario in `/tmp/aggiorna-debug-<pid>/`: una riga con l'ora a ogni passo e a ogni domanda (con la risposta data), più l'output completo di ogni comando. Se lo script si ferma, l'ultima riga del diario dice esattamente dove era arrivato e da quanto tempo era lì. Il percorso viene stampato anche a fine esecuzione.
+
+## Test locali
+
+`bash -n aggiorna && bash -n install` controlla la sintassi degli script.
+`python3 -m unittest discover -s tests -v` verifica il rilevamento e la visualizzazione delle domande con comandi simulati, senza aggiornare il sistema o richiedere privilegi.
