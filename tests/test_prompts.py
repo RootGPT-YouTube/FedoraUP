@@ -328,6 +328,28 @@ QUIET_TICKS=5
         self.assertIn("sudo: a password is required", output)
         self.assertNotIn("the command is asking:", output)
 
+    def test_reboot_check_never_gets_the_terminal_stdin(self):
+        """Il vero `fwupdmgr check-reboot-needed` chiede "Restart now? [y|N]" e
+        aspetta. Con lo stdout in /dev/null e lo stdin sul terminale la domanda
+        sparisce e lo script resta appeso sotto "controlli finali" (caso reale,
+        11 set 2026). Il finto imita la regola vera: blocca se gli arriva lo
+        stdin del terminale."""
+        self.command("rpm", "exit 0")
+        self.command("fwupdmgr", """
+            if [ -t 0 ]; then
+                printf 'An update requires a reboot to complete. Restart now? [y|N]: '
+                IFS= read -r answer          # il vero fwupdmgr aspetta qui, per sempre
+                exit 95
+            fi
+            exit 0
+        """)
+        output = self.terminal("""
+            detect_reboot_needed
+            printf 'REASONS=<%s>\\n' "${REBOOT_REASONS[*]}"
+        """, [])
+        self.assertIn("firmware update waiting to be applied at boot", output)
+        self.assertNotIn("Restart now?", output)
+
     def test_failed_commands_remain_failed(self):
         self.command("mock-fail", "printf 'mock failure\\n' >&2\nexit 7")
         self.bash("""

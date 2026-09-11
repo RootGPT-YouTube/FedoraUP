@@ -946,9 +946,23 @@ detect_reboot_needed() {
     core=${core% }
     [[ -n $core ]] && REBOOT_REASONS+=("core packages updated since boot: $core")
 
-    # firmware staged by fwupd, applied by the firmware itself at the next boot
+    # Firmware staged by fwupd, applied by the firmware itself at the next boot.
+    #
+    # ⚠️ check-reboot-needed non e' una domanda retorica: quando il riavvio serve
+    # davvero **chiede** "An update requires a reboot to complete. Restart now?
+    # [y|N]" e aspetta. Qui lo stdout andava in /dev/null mentre lo stdin era
+    # ancora il terminale: la domanda spariva e lo script restava appeso per
+    # sempre sotto "controlli finali", senza niente a schermo. Chi rispondeva y
+    # alla cieca si ritrovava il pc riavviato. Tre guardie, e servono tutte e tre:
+    #   </dev/null  la domanda non puo' piu' bloccare nessuno (EOF = "no")
+    #   --json      cosi' la domanda non viene nemmeno posta
+    #   timeout     il verdetto arriva dal daemon via D-Bus, e un daemon che non
+    #               risponde non deve poter fermare lo script a un passo dalla fine
+    # Il codice di uscita resta l'informazione utile: 0 = riavvio in attesa
+    # (verificato: con un device-id inesistente torna 1).
     if command -v fwupdmgr >/dev/null 2>&1 &&
-       env LC_ALL=C fwupdmgr check-reboot-needed >/dev/null 2>&1; then
+       timeout 10 env LC_ALL=C fwupdmgr check-reboot-needed --json \
+               </dev/null >/dev/null 2>&1; then
         REBOOT_REASONS+=("firmware update waiting to be applied at boot")
     fi
 
