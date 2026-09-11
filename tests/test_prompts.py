@@ -350,6 +350,22 @@ QUIET_TICKS=5
         self.assertIn("firmware update waiting to be applied at boot", output)
         self.assertNotIn("Restart now?", output)
 
+    def test_script_questions_never_use_read_p(self):
+        """`read -p` stampa il prompt solo se il *suo* stdin e' un terminale, e
+        lo manda su stderr: con lo stdin altrove la domanda sparisce mentre il
+        read continua ad aspettare. Qui lo stdin non e' un terminale e la
+        domanda deve comparire lo stesso, senza errori su stderr."""
+        code = "\n".join(l for l in DEFINITIONS.splitlines()
+                         if not l.lstrip().startswith("#"))
+        for forbidden in ("read -r -p", "read -p"):
+            self.assertNotIn(forbidden, code,
+                             f"{forbidden} e' tornato in un prompt dello script")
+        output = self.bash("""
+            ask_yes_no "Accetti e vuoi continuare?" && echo SI || echo NO
+        """, input="y\n")
+        self.assertIn("Accetti e vuoi continuare?", output)
+        self.assertIn("SI", output)
+
     def test_failed_commands_remain_failed(self):
         self.command("mock-fail", "printf 'mock failure\\n' >&2\nexit 7")
         self.bash("""

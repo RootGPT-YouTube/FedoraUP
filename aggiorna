@@ -985,11 +985,13 @@ detect_reboot_needed() {
 ask_read() {
     local -n _ans=$1
     _ans=''
-    if [ -r /dev/tty ]; then
-        IFS= read -r _ans < /dev/tty || _ans=''
-    else
-        IFS= read -r _ans || _ans=''
+    # `[ -r /dev/tty ]` non basta: senza terminale di controllo (cron, un
+    # lanciatore, una sessione staccata) il file c'e' e risulta leggibile, ma
+    # aprirlo fallisce e bash stampa l'errore su stderr. Si tenta e si ripiega.
+    if [ -r /dev/tty ] && { IFS= read -r _ans < /dev/tty; } 2>/dev/null; then
+        return 0
     fi
+    IFS= read -r _ans || _ans=''
 }
 
 ask_yes_no() {
