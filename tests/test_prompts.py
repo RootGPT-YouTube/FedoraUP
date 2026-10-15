@@ -454,6 +454,30 @@ QUIET_TICKS=5
              "runtime/org.freedesktop.Platform.GL.default/x86_64/24.08",
              "runtime/org.freedesktop.Platform/x86_64/24.08"])
 
+    def test_flatpak_unused_list_gives_full_refs(self):
+        """`uninstall --unused` mostra id e branch separati: col solo id
+        flatpak chiedeva quale fra le Locale 6.10, 6.11 e 5.15-25.08
+        togliere e la rimozione abortiva (caso reale, 15 ott 2026)."""
+        self.command("flatpak", r"""
+            if [[ $1 == uninstall ]]; then
+                printf '\n\n 1.\t   \torg.kde.Platform\t6.10\tr\n'
+                printf ' 2.\t   \torg.kde.Platform.Locale\t6.10\tr\n'
+                printf '\nProceed with these changes to the system installation? [Y/n]: '
+                exit 0
+            fi
+            [[ $1 == list ]] || exit 1
+            printf 'org.kde.Platform/x86_64/6.10\n'
+            printf 'org.kde.Platform/x86_64/6.11\n'
+            printf 'org.kde.Platform.Locale/x86_64/5.15-25.08\n'
+            printf 'org.kde.Platform.Locale/x86_64/6.10\n'
+            printf 'org.kde.Platform.Locale/x86_64/6.11\n'
+        """)
+        output = self.bash("flatpak_refs unused")
+        self.assertEqual(
+            output.splitlines(),
+            ["runtime/org.kde.Platform/x86_64/6.10",
+             "runtime/org.kde.Platform.Locale/x86_64/6.10"])
+
     def test_main_dnf_calls_keep_command_argument_positions(self):
         calls = "\n".join(line for line in SOURCE.splitlines()
                           if line.startswith("run_dnf "))
