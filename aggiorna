@@ -804,6 +804,17 @@ run_flatpak() {
         # statici (vedi flatpak_delta_failure), e riparte da capo col flag in piu'.
         local lrc=0 attempt=1 extra=() note='' mark=0
         local shown; shown=$(ref_label "$ref")
+        # Togliere un runtime si porta dietro le sue estensioni: uninstall di
+        # org.kde.Platform 6.10 rimuove anche Platform.Locale 6.10, che pero'
+        # e' ancora piu' avanti nell'elenco. Al suo turno flatpak risponde "No
+        # installed refs found" ed esce con 1, e il passo diventava rosso dopo
+        # aver fatto esattamente quello che doveva. Chi e' gia' sparito e'
+        # gia' rimosso: si salta.
+        if [[ $mode == remove ]] && ! env LC_ALL=C flatpak info "$ref" >/dev/null 2>&1; then
+            printf '%s\n' "--- gia' rimosso insieme a un ref precedente: $ref" >>"$log"
+            trace "gia' rimosso: $ref"
+            continue
+        fi
         while true; do
             local cur_pct=0 fd
             lrc=0

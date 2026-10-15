@@ -288,6 +288,7 @@ QUIET_TICKS=5
 
     def test_flatpak_update_and_remove_prompts(self):
         self.command("flatpak", r"""
+            [[ $1 == info ]] && exit 0     # il ref c'e' ancora
             printf '\e[33mPress ENTER to continue\e[0m\n\n'
             IFS= read -r answer
             printf 'ANSWER=<%s>\n100%%\n' "$answer"
@@ -390,6 +391,34 @@ QUIET_TICKS=5
         args = (self.root / "flatpak-args").read_text().splitlines()
         self.assertEqual(len(args), 2)
         self.assertIn("--no-static-deltas", args[1])
+
+    def test_flatpak_remove_skips_refs_already_taken_with_their_runtime(self):
+        """Togliere org.kde.Platform 6.10 si porta via anche la sua .Locale,
+        che pero' e' piu' avanti nell'elenco: al suo turno flatpak diceva "No
+        installed refs found" e il passo finiva rosso dopo aver fatto tutto
+        (caso reale, 15 ott 2026)."""
+        self.command("flatpak", r"""
+            state="$TEST_ROOT/installed"
+            [[ -e $state ]] || printf 'runtime/org.kde.Platform/x86_64/6.10\nruntime/org.kde.Platform.Locale/x86_64/6.10\n' >"$state"
+            if [[ $1 == info ]]; then grep -qxF "$2" "$state"; exit; fi
+            [[ $1 == uninstall ]] || exit 1
+            ref=${!#}
+            printf '%s\n' "$ref" >> "$TEST_ROOT/uninstalled"
+            grep -qxF "$ref" "$state" || {
+                printf 'error: No installed refs found for %s\n' "$ref" >&2; exit 1; }
+            # come flatpak: il runtime se ne va con le sue estensioni
+            grep -vF "${ref%/*/*}" "$state" >"$state.new"; mv "$state.new" "$state"
+            printf 'Uninstall complete.\n'
+        """)
+        self.bash("""
+            run_flatpak Test-unused remove 0 1000 \
+                runtime/org.kde.Platform/x86_64/6.10 \
+                runtime/org.kde.Platform.Locale/x86_64/6.10
+            (( steps_ok == 1 && steps_fail == 0 ))
+        """)
+        self.assertEqual(
+            (self.root / "uninstalled").read_text().splitlines(),
+            ["runtime/org.kde.Platform/x86_64/6.10"])
 
     def test_flatpak_update_list_survives_a_new_runtime(self):
         """Quando un'app passa a un runtime non ancora installato, `flatpak
