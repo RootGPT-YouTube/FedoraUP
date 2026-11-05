@@ -286,6 +286,75 @@ QUIET_TICKS=5
         """, [("Continue? [y/N]", "y\n")])
         self.assertIn("Install 1/1:", output)
 
+    SIGNATURE_FAILURE = r'''
+        printf 'Transaction failed: Signature verification failed.\n'
+        printf 'OpenPGP check for package "%s-1-1.x86_64" (/var/cache/%s.rpm) from repo "%s" has failed: Import of the key didn'"'"'t help, wrong key?\n' "$1" "$1" "$2"
+    '''
+
+    def test_signature_failure_leaves_out_only_that_repo(self):
+        self.command("mock-dnf", r'''
+            signature_failure() {''' + self.SIGNATURE_FAILURE + r'''}
+            printf '%s\n' "$*" >> "$TEST_ROOT/calls"
+            case "$*" in
+                *--disablerepo=vendor-b*) printf 'Running transaction\n'; exit 0;;
+                *--disablerepo=vendor-a*) signature_failure pkg-b vendor-b; exit 1;;
+                *) printf 'Skipping packages with broken dependencies:\n'
+                   signature_failure pkg-a vendor-a; exit 1;;
+            esac
+        ''')
+        output = self.terminal('''
+            NO_AUTOREPAIR=0
+            run_dnf Test-sig Install 0 300 300 1000 mock-dnf upgrade -y
+            (( steps_ok == 0 && steps_fail == 1 ))
+        ''', [])
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertEqual(calls, [
+            "upgrade -y",
+            "upgrade -y --disablerepo=vendor-a",
+            "upgrade -y --disablerepo=vendor-a --disablerepo=vendor-b",
+        ])
+        self.assertIn("vendor-a: pkg-a-1-1.x86_64 failed the signature check", output)
+        self.assertIn("vendor-b: pkg-b-1-1.x86_64 failed the signature check", output)
+        self.assertIn("done, except: vendor-a vendor-b", output)
+        # sudo is the forbidden mock here: no repair rung may have been reached.
+
+    def test_signature_failure_never_disables_the_check(self):
+        for word in ("nogpgcheck", "no-gpgchecks", "gpgcheck=0"):
+            self.assertNotIn(word, SOURCE)
+
+    def test_release_upgrade_does_not_skip_a_repo_on_signature_failure(self):
+        self.command("mock-dnf", r'''
+            signature_failure() {''' + self.SIGNATURE_FAILURE + r'''}
+            printf '%s\n' "$*" >> "$TEST_ROOT/calls"
+            signature_failure pkg-a vendor-a; exit 1
+        ''')
+        self.terminal('''
+            run_dnf Test-sig Install 0 300 300 1000 mock-dnf system-upgrade download
+            (( steps_ok == 0 && steps_fail == 1 ))
+        ''', [])
+        self.assertEqual((self.root / "calls").read_text().splitlines(),
+                         ["system-upgrade download"])
+
+    def test_held_back_update_is_not_a_broken_state(self):
+        log = self.root / "dnf.log"
+        log.write_text(
+            "Skipping packages with conflicts:\n"
+            " libheif x86_64 1.23.7-1.fc44 updates 2.4 MiB\n"
+            "Skipping packages with broken dependencies:\n"
+            " libheif-freeworld x86_64 1.21.2-3.fc44 rpmfusion-free 185.7 KiB\n"
+            "Transaction failed: Signature verification failed.\n"
+        )
+        self.bash(f'! dnf_looks_broken "{log}"')
+
+    def test_really_broken_states_still_trigger_the_repair(self):
+        log = self.root / "dnf.log"
+        for line in ("error: rpmdb open failed",
+                     " - nothing provides libfoo needed by bar",
+                     "Skipping packages with broken dependencies:\n"
+                     "error: could not run transaction"):
+            log.write_text(line + "\n")
+            self.bash(f'dnf_looks_broken "{log}"')
+
     def test_flatpak_update_and_remove_prompts(self):
         self.command("flatpak", r"""
             [[ $1 == info ]] && exit 0     # il ref c'e' ancora

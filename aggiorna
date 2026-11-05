@@ -675,8 +675,33 @@ NO_AUTOREPAIR=0
 #                reached if L1 ran and the state STILL looks broken.
 
 # does the command log look like a broken / interrupted RPM state?
+# "Skipping packages with broken dependencies:" is not one of those: it is dnf
+# holding back an update it cannot take yet (RPM Fusion a day behind Fedora), on
+# a perfectly healthy system. It sits in the log of any transaction, so whatever
+# else made that transaction fail would otherwise end in a distro-sync.
 dnf_looks_broken() {
-    grep -qiE 'rpmdb|rpm database|cannot open packages|depsolve|nothing provides|conflicts with file|file .* conflicts|transaction (test|check) error|could not run transaction|unfinished transaction|broken (dependencies|packages)|duplicate' "$1"
+    grep -qiE 'rpmdb|rpm database|cannot open packages|depsolve|nothing provides|conflicts with file|file .* conflicts|transaction (test|check) error|could not run transaction|unfinished transaction|broken (dependencies|packages)|duplicate' \
+        < <(grep -viE '^[[:space:]]*Skipping packages with' "$1")
+}
+
+# The repos whose packages failed the signature check, one per line. dnf throws
+# the whole transaction away for a single bad package, so one third-party vendor
+# rotating its signing key would hold back every update on the system.
+dnf_signature_repos() {
+    sed -nE 's/^[[:space:]]*OpenPGP check for package .* from repo "([^"]+)" has failed.*/\1/p' "$1" | sort -u
+}
+
+# What a repo left out of the upgrade means, and what is left to do. Trusting a
+# new key is the user's call: nothing here imports one or lowers gpgcheck.
+signature_box() {
+    local detail=$1
+    printf '   %s┃%s\n' "$DIM" "$RESET"
+    printf '   %s┗━ not updated ──────────────────────────────%s\n' "$GOLD" "$RESET"
+    printf '%s\n' "$detail" | sed "s/^/      ${DIM}│${RESET} /"
+    printf '      %s│%s The rest of the system was updated; nothing was installed unverified.\n' "$DIM" "$RESET"
+    printf '      %s│%s Usually the vendor rotated its signing key. Check the key it publishes,\n' "$DIM" "$RESET"
+    printf '      %s│%s then: sudo rpmkeys --import <key file>\n' "$DIM" "$RESET"
+    printf '   %s──────────────────────────────────────────────%s\n' "$GOLD" "$RESET"
 }
 
 # L1 — safe repair (no package changes)
@@ -704,9 +729,11 @@ run_dnf() {
     local re='^\[[[:space:]]*([0-9]+)/[[:space:]]*([0-9]+)\][[:space:]]+(.*)$'
 
     # Run the transaction; on a broken/interrupted failure, self-heal in two
-    # escalating rungs (L1 safe, L2 deep) and retry the same step in place.
-    local rc=-1 attempt
-    for attempt in 1 2 3; do
+    # escalating rungs (L1 safe, L2 deep) and retry the same step in place. A
+    # signature failure is no broken state: leave that repo out and go on.
+    local rc=-1 attempt=0 repairs=0 repo skipped=() skipped_detail=''
+    while true; do
+        attempt=$(( attempt + 1 ))
         local phase=resolve
         local dl_done=0 dl_total=0 in_done=0 in_total=0
         local counter="resolving…"
@@ -771,11 +798,27 @@ run_dnf() {
         [[ -n $pending ]] && printf '%s\n' "$pending" >>"$log"
 
         (( rc == 0 )) && break
+        # A repo that failed the signature check: retry without it, never without
+        # the check. Each round removes a repo, so this cannot loop for ever.
+        local bad_repos=()
+        (( NO_AUTOREPAIR )) || mapfile -t bad_repos < <(dnf_signature_repos "$log")
+        if (( ${#bad_repos[@]} )); then
+            for repo in "${bad_repos[@]}"; do
+                skipped+=("$repo")
+                cmd+=("--disablerepo=$repo")
+            done
+            skipped_detail+=$(sed -nE 's/^[[:space:]]*OpenPGP check for package "([^"]+)".* from repo "([^"]+)" has failed.*/\2: \1 failed the signature check/p' "$log")$'\n'
+            finish_node '⚠' "$GOLD" "$label — signature check failed, retrying without: ${bad_repos[*]}"
+            connector
+            : > "$log"
+            continue
+        fi
         # Failure that looks like a broken RPM state: collapse to a warning,
         # run the next repair rung, then loop to retry. L1 on the 1st failure,
         # L2 on the 2nd; the 3rd failure falls through to the error box.
-        if (( attempt < 3 && ! NO_AUTOREPAIR )) && dnf_looks_broken "$log"; then
-            if (( attempt == 1 )); then
+        if (( repairs < 2 && ! NO_AUTOREPAIR )) && dnf_looks_broken "$log"; then
+            repairs=$(( repairs + 1 ))
+            if (( repairs == 1 )); then
                 finish_node '⚠' "$GOLD" "$label — broken state detected, repairing (rpmdb/cache)…"
                 run_step "Repairing RPM state (clean + rebuilddb)" _recover_dnf_l1
             else
@@ -790,11 +833,17 @@ run_dnf() {
     done
 
     draw_total_footer "$in_hi"
-    if (( rc == 0 )); then
+    if (( rc == 0 && ${#skipped[@]} )); then
+        # The step did its job on everything else, but something is still out of
+        # date: it must not read as a clean run.
+        finish_node '⚠' "$GOLD" "$label — done, except: ${skipped[*]}"
+        steps_fail=$(( steps_fail + 1 )); signature_box "${skipped_detail%$'\n'}"
+    elif (( rc == 0 )); then
         finish_node '●' "$GREEN" "$label"; steps_ok=$(( steps_ok + 1 ))
     else
         finish_node '✗' "$RED" "$label"; steps_fail=$(( steps_fail + 1 )); error_box "$log"
     fi
+    [[ -n $skipped_detail ]] && printf '%s' "$skipped_detail" >>"$log"
     drop_log "$log" "$label"
 }
 
